@@ -65,6 +65,7 @@ global DepositBoxColor := ""     ; 0xRRGGBB, set with Ctrl+Shift+D
 global BankingStep := 0          ; 0=idle, 1=nav1, 2=wait, 3=nav2, 4=wait, 5=deposit box, 55=wait open+click deposit, 6=wait closed, 7=nav2 return, 8=wait, 9=nav1 return, 10=wait
 global BankWaitUntil := 0        ; tick when current wait ends
 global BankRecaptureEmptyAt := 0 ; tick when to re-capture empty baseline after deposit (0 = not pending)
+global BankDepositAreaLastClickAt := 0 ; tick of last deposit-area click (for retry cooldown in step 6)
 global BankNavWaitMin := 2000    ; ms to wait between nav1 and nav2 going to bank (2–3 s)
 global BankNavWaitMax := 3000
 global BankDepositBoxOpenWaitMin := 7000 ; ms to wait for deposit box to open after clicking it (7–9 s)
@@ -72,12 +73,13 @@ global BankDepositBoxOpenWaitMax := 9000
 global BankDepositWaitMin := 5000 ; ms to wait after clicking deposit-all (5–7 s before return)
 global BankDepositWaitMax := 7000
 global BankDepositClosedTimeout := 8000 ; max ms to wait for deposit area color to disappear (box closed)
+global BankDepositAreaClickCooldownMs := 2500 ; min ms between deposit-area clicks (retry if color persists = other fish types)
 global BankReturnNav2WaitMin := 7000 ; ms after clicking nav 2 on return (7–9 s)
 global BankReturnNav2WaitMax := 9000
 global BankReturnNav1WaitMin := 2000 ; ms after clicking nav 1 on return (2–3 s)
 global BankReturnNav1WaitMax := 3000
-global BankingColorVariation := 50 ; color tolerance for deposit box click (OSRS shading)
-global BankingNavColorVariation := 15 ; tighter tolerance for nav tiles only (reduce false positives)
+global BankingColorVariation := 5  ; deposit box: exact or super close (per-channel tolerance 0–255)
+global BankingNavColorVariation := 5 ; nav tiles: exact or super close (reduce false positives)
 global BankingImageOffset := 15   ; when using image search: click this many px from top-left of found image
 
 ; Deposit box open detection: area + color; when color found in area, deposit box is open
@@ -1094,6 +1096,7 @@ TryBankWhenFull() {
     global BankingStep, BankWaitUntil, BankNavWaitMin, BankNavWaitMax
     global BankDepositBoxOpenWaitMin, BankDepositBoxOpenWaitMax
     global BankDepositWaitMin, BankDepositWaitMax, BankRecaptureEmptyAt
+    global BankDepositAreaLastClickAt, BankDepositAreaClickCooldownMs
     global NavTile1Color, NavTile2Color, DepositBoxColor, BankingColorVariation, BankingNavColorVariation, BankingImageOffset
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
     if (BankingStep = 0)
@@ -1173,6 +1176,7 @@ TryBankWhenFull() {
         if (IsDepositBoxOpen()) {
             ; Box is open: click the color in the deposit area (e.g. Deposit-all)
             if (ClickColorInDepositArea()) {
+                BankDepositAreaLastClickAt := A_TickCount
                 BankingStep := 6
                 BankWaitUntil := A_TickCount + BankDepositClosedTimeout
             }
@@ -1183,12 +1187,16 @@ TryBankWhenFull() {
         return
     }
     if (BankingStep = 6) {
-        ; Deposited = set color no longer in deposit area (box closed). Then go to returning (nav2 -> nav1).
+        ; Deposited = set color no longer in deposit area (box closed). If color persists, click again (other fish types).
         depositOpenSet := (DepositBoxOpenX2 > DepositBoxOpenX1 && DepositBoxOpenY2 > DepositBoxOpenY1 && DepositBoxOpenColor != "")
         if (depositOpenSet) {
-            ; Know we deposited when the deposit-area color is gone (or timeout)
             if (!IsDepositBoxOpen() || A_TickCount >= BankWaitUntil)
                 BankingStep := 7
+            else if (A_TickCount - BankDepositAreaLastClickAt >= BankDepositAreaClickCooldownMs) {
+                ; Color still there = deposit box still open (e.g. other fish types); click deposit area again
+                if (ClickColorInDepositArea())
+                    BankDepositAreaLastClickAt := A_TickCount
+            }
         } else {
             if (A_TickCount >= BankWaitUntil)
                 BankingStep := 7
