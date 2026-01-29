@@ -36,6 +36,10 @@ global PlayAreaX1 := 0              ; top-left X
 global PlayAreaY1 := 0              ; top-left Y
 global PlayAreaX2 := 0              ; bottom-right X
 global PlayAreaY2 := 0              ; bottom-right Y
+global PlayAreaOverlayGuis := []    ; up to 8 small red-line windows
+global CornerMarkSize := 30         ; px length of each leg of the L (play area)
+global WatchRegionOverlayGuis := [] ; up to 8 small yellow-line windows (combat check area)
+global WatchCornerMarkSize := 12   ; px length of each leg (smaller than play area)
 
 ; Targeting
 global AttackInterval := 5000       ; ms between attack attempts when out of combat (5 seconds)
@@ -106,19 +110,23 @@ BuildStatusGui() {
     StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
     StatusGui.Add("Text", "vStatusText", "Auto Fighter  |  Paused  |  Out of combat")
     StatusGui.Add("Text", "vTimerText", "Pause in: —")
+    StatusGui.Add("Text", "vSetText", "Color —  Play —  Combat —  Watch —")
+    StatusGui.Add("Text", "vPlayAreaText", "Play area: —")
     StatusGui.Add("Text", "Section", "Run (min):")
     StatusGui.Add("Edit", "vRunMinutes xs+58 ys-2 w44", String(RunDurationMinutes))
     StatusGui["RunMinutes"].SetFont("cBlack")
     StatusGui.Add("Text", "xs+106 ys-2", "0 = unlimited")
     StatusGui.MarginX := 12
     StatusGui.MarginY := 8
-    x := A_ScreenWidth - 280
+    x := A_ScreenWidth - 320
     y := 10
     StatusGui.Show("x" x " y" y " NoActivate")
 }
 
 UpdateStatusGui() {
     global StatusGui, IsRunning, InCombat, RunDurationMinutes, RunStartTime, ConfigPath
+    global TargetColor, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global InCombatCheckColor, InCombatCheck2Color, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
     if !StatusGui
         return
     ; Auto-stop when run duration reached
@@ -152,10 +160,35 @@ UpdateStatusGui() {
         StatusGui["StatusText"].Value := "Auto Fighter  |  " runText "  |  " combatText
     catch
         {}
+    ; Which variables are set
+    c := (TargetColor != "") ? "Color ✓" : "Color —"
+    playSet := (PlayAreaX2 > PlayAreaX1 && PlayAreaY2 > PlayAreaY1)
+    p := playSet ? "Play ✓" : "Play —"
+    combatSet := (InCombatCheckColor != "" && InCombatCheck2Color != "")
+    cb := combatSet ? "Combat ✓" : "Combat —"
+    watchSet := (WatchRegionX2 > WatchRegionX1 && WatchRegionY2 > WatchRegionY1)
+    w := watchSet ? "Watch ✓" : "Watch —"
+    try
+        StatusGui["SetText"].Value := c "  " p "  " cb "  " w
+    catch
+        {}
+    ; Play area corners
+    if (playSet)
+        try
+            StatusGui["PlayAreaText"].Value := "Play: (" PlayAreaX1 "," PlayAreaY1 ") → (" PlayAreaX2 "," PlayAreaY2 ")"
+        catch
+            {}
+    else
+        try
+            StatusGui["PlayAreaText"].Value := "Play area: —"
+        catch
+            {}
 }
 
 ; Build and show status window; refresh every 500 ms
 BuildStatusGui()
+BuildPlayAreaOverlay()
+BuildWatchRegionOverlay()
 SetTimer(UpdateStatusGui, 500)
 
 ; --- Hotkeys ---
@@ -277,6 +310,7 @@ SetPlayAreaTopLeft() {
         {}
     ToolTip("Play area TOP-LEFT set at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
+    BuildPlayAreaOverlay()
 }
 
 SetPlayAreaBottomRight() {
@@ -291,6 +325,42 @@ SetPlayAreaBottomRight() {
         {}
     ToolTip("Play area BOTTOM-RIGHT set at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
+    BuildPlayAreaOverlay()
+}
+
+; --- Draw red L-shaped corner marks on screen for play area (8 small red windows, no TransColor) ---
+BuildPlayAreaOverlay() {
+    global PlayAreaOverlayGuis, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2, CornerMarkSize
+    for overlayWin in PlayAreaOverlayGuis {
+        try
+            overlayWin.Destroy()
+        catch
+            {}
+    }
+    PlayAreaOverlayGuis := []
+    if (PlayAreaX2 <= PlayAreaX1 || PlayAreaY2 <= PlayAreaY1)
+        return
+    L := CornerMarkSize
+    W := 4
+    ; Each line is its own small always-on-top red window (click-through), so they stay visible
+    line(x, y, w, h) {
+        g := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x20")
+        g.BackColor := "FF0000"
+        g.Show("x" x " y" y " w" w " h" h " NoActivate")
+        return g
+    }
+    ; Top-left L
+    PlayAreaOverlayGuis.Push(line(PlayAreaX1, PlayAreaY1, W, L))
+    PlayAreaOverlayGuis.Push(line(PlayAreaX1, PlayAreaY1, L, W))
+    ; Top-right L
+    PlayAreaOverlayGuis.Push(line(PlayAreaX2 - W, PlayAreaY1, W, L))
+    PlayAreaOverlayGuis.Push(line(PlayAreaX2 - L, PlayAreaY1, L, W))
+    ; Bottom-left L
+    PlayAreaOverlayGuis.Push(line(PlayAreaX1, PlayAreaY2 - L, W, L))
+    PlayAreaOverlayGuis.Push(line(PlayAreaX1, PlayAreaY2 - W, L, W))
+    ; Bottom-right L
+    PlayAreaOverlayGuis.Push(line(PlayAreaX2 - W, PlayAreaY2 - L, W, L))
+    PlayAreaOverlayGuis.Push(line(PlayAreaX2 - L, PlayAreaY2 - W, L, W))
 }
 
 ; --- Watch region: drastic change vs previous check = in combat; no change for 3s = out of combat ---
@@ -306,6 +376,7 @@ SetWatchRegionTopLeft() {
         {}
     ToolTip("Watch region TOP-LEFT at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
+    BuildWatchRegionOverlay()
 }
 
 SetWatchRegionBottomRight() {
@@ -320,6 +391,37 @@ SetWatchRegionBottomRight() {
         {}
     ToolTip("Watch region BOTTOM-RIGHT at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
+    BuildWatchRegionOverlay()
+}
+
+; --- Draw small yellow L-shaped corner marks for watch region (combat check area) ---
+BuildWatchRegionOverlay() {
+    global WatchRegionOverlayGuis, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2, WatchCornerMarkSize
+    for overlayWin in WatchRegionOverlayGuis {
+        try
+            overlayWin.Destroy()
+        catch
+            {}
+    }
+    WatchRegionOverlayGuis := []
+    if (WatchRegionX2 <= WatchRegionX1 || WatchRegionY2 <= WatchRegionY1)
+        return
+    L := WatchCornerMarkSize
+    W := 2
+    line(x, y, w, h) {
+        g := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x20")
+        g.BackColor := "FFFF00"
+        g.Show("x" x " y" y " w" w " h" h " NoActivate")
+        return g
+    }
+    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY1, W, L))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY1, L, W))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - W, WatchRegionY1, W, L))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - L, WatchRegionY1, L, W))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY2 - L, W, L))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY2 - W, L, W))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - W, WatchRegionY2 - L, W, L))
+    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - L, WatchRegionY2 - W, L, W))
 }
 
 ; --- In combat = (watch region set) drastic change vs last check, else two-pixel check ---
