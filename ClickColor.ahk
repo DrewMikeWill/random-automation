@@ -105,8 +105,10 @@ BuildStatusGui() {
     StatusGui.BackColor := "1e1e1e"
     StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
     StatusGui.Add("Text", "vStatusText", "Auto Fighter  |  Paused  |  Out of combat")
+    StatusGui.Add("Text", "vTimerText", "Pause in: —")
     StatusGui.Add("Text", "Section", "Run (min):")
     StatusGui.Add("Edit", "vRunMinutes xs+58 ys-2 w44", String(RunDurationMinutes))
+    StatusGui["RunMinutes"].SetFont("cBlack")
     StatusGui.Add("Text", "xs+106 ys-2", "0 = unlimited")
     StatusGui.MarginX := 12
     StatusGui.MarginY := 8
@@ -120,14 +122,29 @@ UpdateStatusGui() {
     if !StatusGui
         return
     ; Auto-stop when run duration reached
-    if (IsRunning && RunDurationMinutes > 0) {
-        elapsedMin := (A_TickCount - RunStartTime) / 60000
+    if (IsRunning && RunDurationMinutes > 0 && RunStartTime > 0) {
+        elapsedMs := A_TickCount - RunStartTime
+        elapsedMin := elapsedMs / 60000
         if (elapsedMin >= RunDurationMinutes) {
             PauseClicker()
             ToolTip("Run duration reached (" RunDurationMinutes " min).")
             SetTimer(() => ToolTip(), 3000)
             return
         }
+        ; Show countdown: Pause in: mm:ss
+        remainingMs := (RunDurationMinutes * 60000) - elapsedMs
+        remainingSec := Max(0, Round(remainingMs / 1000))
+        timerMin := remainingSec // 60
+        timerSec := remainingSec - (timerMin * 60)
+        try
+            StatusGui["TimerText"].Value := "Pause in: " timerMin ":" (timerSec < 10 ? "0" : "") timerSec
+        catch
+            {}
+    } else {
+        try
+            StatusGui["TimerText"].Value := "Pause in: —"
+        catch
+            {}
     }
     runText := IsRunning ? "Running" : "Paused"
     combatText := InCombat ? "In combat" : "Out of combat"
@@ -178,10 +195,11 @@ StartClicker() {
     SetTimer(() => ToolTip(), 2000)
 }
 
-; --- Pause ---
+; --- Pause (resets run timer so next start gets full duration again) ---
 PauseClicker() {
-    global IsRunning
+    global IsRunning, RunStartTime
     IsRunning := false
+    RunStartTime := 0   ; reset so next start begins a fresh run
     SetTimer(UpdateInCombatState, 0)
     SetTimer(TryAttackWhenOutOfCombat, 0)
     ToolTip("Auto fighter: Paused")
