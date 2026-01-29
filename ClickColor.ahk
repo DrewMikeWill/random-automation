@@ -18,6 +18,7 @@ global InCombatCheckBox := 25         ; check ±25 px around each set point
 global InCombat := false
 global LastInCombatSeen := 0
 global OutOfCombatDelay := 2000      ; ms without both indicators = out of combat
+global CombatCheckInterval := 250   ; ms between in-combat checks (smaller = more responsive)
 
 ; Optional: combat = drastic change in watch region vs previous check; no drastic change for 3s = out of combat
 global WatchRegionX1 := 0            ; top-left of area to watch (set with Ctrl+Shift+Y / U)
@@ -171,7 +172,7 @@ StartClicker() {
         {}
     RunStartTime := A_TickCount
     IsRunning := true
-    SetTimer(UpdateInCombatState, 500)
+    SetTimer(UpdateInCombatState, CombatCheckInterval)
     SetTimer(TryAttackWhenOutOfCombat, AttackInterval)
     ToolTip("Auto fighter: Running" (RunDurationMinutes > 0 ? " (" RunDurationMinutes " min)" : ""))
     SetTimer(() => ToolTip(), 2000)
@@ -303,7 +304,7 @@ SetWatchRegionBottomRight() {
     SetTimer(() => ToolTip(), 2000)
 }
 
-; --- Every 500 ms: in combat = (watch region set) drastic change vs last check, else two-pixel check ---
+; --- In combat = (watch region set) drastic change vs last check, else two-pixel check ---
 UpdateInCombatState() {
     global InCombat, LastInCombatSeen, OutOfCombatDelay
     global InCombatCheckX, InCombatCheckY, InCombatCheckColor
