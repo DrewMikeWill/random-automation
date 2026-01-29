@@ -85,6 +85,16 @@ global DepositBoxOpenY2 := 0
 global DepositBoxOpenColor := ""
 global DepositBoxOpenVariation := 15
 
+; Mode: Banking (bank/deposit/return) or Powerfishing (drop all when full)
+global FishingMode := "Banking"
+; Powerfishing: up to 27 item slot positions; one hotkey adds current pos, one clears all
+global PowerfishSlots := []           ; array of [x, y]
+global PowerfishLastDropAt := 0       ; tick when we last ran drop-all (cooldown)
+global PowerfishDropCooldownMs := 2000
+global PowerfishClickDelayMin := 100 ; ms between each shift+click (0.1–0.4 s)
+global PowerfishClickDelayMax := 400
+global PowerfishJitter := 3          ; pixels variation per click
+
 CoordMode("Pixel", "Screen")
 CoordMode("Mouse", "Screen")
 
@@ -96,7 +106,7 @@ LoadConfig() {
     global InvSlotX1, InvSlotY1, InvSlotX2, InvSlotY2, InvSlotEmptyColor
     global NavTile1Color, NavTile2Color, DepositBoxColor
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
-    global RunDurationMinutes
+    global FishingMode, PowerfishSlots, RunDurationMinutes
     try {
         if FileExist(ConfigPath) {
             c := IniRead(ConfigPath, "Settings", "FishingSpotColor", "")
@@ -136,6 +146,22 @@ LoadConfig() {
             dboc := IniRead(ConfigPath, "DepositBoxOpen", "Color", "")
             if (dboc != "")
                 DepositBoxOpenColor := "0x" dboc
+            mode := IniRead(ConfigPath, "Settings", "FishingMode", "Banking")
+            if (mode = "Powerfishing" || mode = "Banking")
+                FishingMode := mode
+            PowerfishSlots := []
+            try {
+                count := Integer(IniRead(ConfigPath, "Powerfishing", "SlotCount", "0"))
+                loop count {
+                    s := IniRead(ConfigPath, "Powerfishing", "Slot" A_Index, "")
+                    if (s != "") {
+                        parts := StrSplit(s, ",")
+                        if (parts.Length >= 2)
+                            PowerfishSlots.Push([Integer(parts[1]), Integer(parts[2])])
+                    }
+                }
+            } catch
+                {}
             RunDurationMinutes := Integer(IniRead(ConfigPath, "Settings", "RunDurationMinutes", "0"))
             if (RunDurationMinutes < 0)
                 RunDurationMinutes := 0
@@ -160,7 +186,7 @@ SetGuiText(ctrl, str) {
 }
 
 BuildStatusGui() {
-    global StatusGui, RunDurationMinutes
+    global StatusGui, RunDurationMinutes, FishingMode
     StatusGui := Gui("+AlwaysOnTop -MaximizeBox -MinimizeBox +ToolWindow")
     StatusGui.BackColor := "1e1e1e"
     StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
@@ -173,6 +199,10 @@ BuildStatusGui() {
     StatusGui.Add("Edit", "vRunMinutes x+6 yp-2 w44", String(RunDurationMinutes))
     StatusGui["RunMinutes"].SetFont("cBlack")
     StatusGui.Add("Text", "x+6 yp+2", "0 = unlimited")
+    modeChoice := (FishingMode = "Powerfishing") ? 2 : 1
+    StatusGui.Add("Text", "xs Section y+4", "Mode:")
+    StatusGui.Add("DDL", "vModeChoose x+6 yp-2 w90 Choose" modeChoice, ["Banking", "Powerfishing"])
+    StatusGui["ModeChoose"].SetFont("cBlack")
     StatusGui.Add("Text", "xs Section y+8", "Configuration (set when game is ready):")
     StatusGui.Add("Text", "vSpotRow xs y+2", "[—] Fishing spot     Ctrl+Shift+C")
     StatusGui.Add("Text", "vPlayRow xs", "[—] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
@@ -182,6 +212,7 @@ BuildStatusGui() {
     StatusGui.Add("Text", "vNav2Row xs", "[—] Nav tile 2       Ctrl+Shift+2")
     StatusGui.Add("Text", "vDepositRow xs", "[—] Deposit box      Ctrl+Shift+D")
     StatusGui.Add("Text", "vDepositOpenRow xs", "[—] Deposit open    Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+F (color)")
+    StatusGui.Add("Text", "vPowerfishRow xs", "[—] Powerfish slots  Ctrl+Shift+A add  Ctrl+Shift+Z clear")
     StatusGui.Add("Text", "xs y+8", "Hotkeys:")
     StatusGui.Add("Text", "vHotkeysRow xs y+2", "Start Ctrl+Shift+Q  |  Pause Ctrl+Shift+W  |  Exit Ctrl+Shift+X")
     x := A_ScreenWidth - 420
@@ -196,8 +227,28 @@ UpdateStatusGui() {
     global InvSlotX1, InvSlotY1, InvSlotX2, InvSlotY2, InvSlotEmptyColor
     global NavTile1Color, NavTile2Color, DepositBoxColor
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
+    global FishingMode, PowerfishSlots, BankingStep, ConfigPath
     if !StatusGui
         return
+    ; Sync mode from dropdown every tick (DDL Value = 1-based index: 1=Banking, 2=Powerfishing)
+    try {
+        modeVal := StatusGui["ModeChoose"].Value
+        if (modeVal = 2 || modeVal = "Powerfishing")
+            newMode := "Powerfishing"
+        else if (modeVal = 1 || modeVal = "Banking")
+            newMode := "Banking"
+        else
+            newMode := "Banking"
+        FishingMode := newMode
+        ; When Powerfishing is selected, clear banking state so we never run banking steps
+        if (FishingMode = "Powerfishing")
+            BankingStep := 0
+        try
+            IniWrite(FishingMode, ConfigPath, "Settings", "FishingMode")
+        catch
+            {}
+    } catch
+        {}
     runMin := 0
     try
         runMin := Integer(StatusGui["RunMinutes"].Value)
@@ -225,9 +276,11 @@ UpdateStatusGui() {
         SetGuiText(StatusGui["TimerText"], "Time left: --")
     }
     runText := IsRunning ? "Running" : "Paused"
-    ; Show state: Returning (steps 7–10), Deposit box open, Banking, or Fishing
+    ; Show state: Dropping (powerfishing), Returning, Deposit box open, Banking, or Fishing
     inBanking := IsInventoryFull || (BankingStep > 0)
-    if (inBanking && BankingStep >= 7 && BankingStep <= 10)
+    if (FishingMode = "Powerfishing" && IsInventoryFull)
+        fishText := "Dropping"
+    else if (inBanking && BankingStep >= 7 && BankingStep <= 10)
         fishText := "Returning"
     else if (inBanking && IsDepositBoxOpen())
         fishText := "Deposit box open"
@@ -274,6 +327,9 @@ UpdateStatusGui() {
     SetGuiText(StatusGui["Nav2Row"], "[" n2 "] Nav tile 2       Ctrl+Shift+2")
     SetGuiText(StatusGui["DepositRow"], "[" dt "] Deposit box      Ctrl+Shift+D")
     SetGuiText(StatusGui["DepositOpenRow"], "[" dto "] Deposit open    Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+F (color)")
+    pfCount := PowerfishSlots.Length
+    pfSt := (FishingMode = "Powerfishing" && pfCount > 0) ? "✓" : "—"
+    SetGuiText(StatusGui["PowerfishRow"], "[" pfSt "] Powerfish slots (" pfCount ")  Ctrl+Shift+A add  Ctrl+Shift+Z clear")
 }
 
 ; --- Play area overlay (red L-shaped corners) ---
@@ -354,6 +410,8 @@ BuildInvSlotOverlay() {
 ^+e:: SetDepositBoxOpenTopLeft()    ; deposit box open area top-left
 ^+r:: SetDepositBoxOpenBottomRight() ; deposit box open area bottom-right
 ^+f:: SetDepositBoxOpenColor()     ; deposit box open color (at cursor)
+^+a:: AddPowerfishSlot()          ; add current mouse pos to powerfish slot list (max 27)
+^+z:: ClearPowerfishSlots()       ; clear all powerfish slot positions
 
 ; --- Start ---
 StartFishing() {
@@ -496,6 +554,41 @@ SetDepositBoxOpenColor() {
         {}
     ToolTip("Deposit open color set at " mx "," my " (color in area = box open)")
     SetTimer(() => ToolTip(), 2000)
+}
+
+; --- Powerfishing: add/clear item slot positions for drop-all ---
+AddPowerfishSlot() {
+    global PowerfishSlots, ConfigPath
+    if (PowerfishSlots.Length >= 27) {
+        ToolTip("Powerfish slots full (27 max)")
+        SetTimer(() => ToolTip(), 2000)
+        return
+    }
+    MouseGetPos(&mx, &my)
+    PowerfishSlots.Push([mx, my])
+    SavePowerfishSlots()
+    ToolTip("Powerfish slot " PowerfishSlots.Length " added at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+ClearPowerfishSlots() {
+    global PowerfishSlots, ConfigPath
+    PowerfishSlots := []
+    SavePowerfishSlots()
+    ToolTip("Powerfish slots cleared")
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SavePowerfishSlots() {
+    global PowerfishSlots, ConfigPath
+    try {
+        IniWrite(String(PowerfishSlots.Length), ConfigPath, "Powerfishing", "SlotCount")
+        loop PowerfishSlots.Length {
+            pt := PowerfishSlots[A_Index]
+            IniWrite(pt[1] "," pt[2], ConfigPath, "Powerfishing", "Slot" A_Index)
+        }
+    } catch
+        {}
 }
 
 ; Returns true if deposit box open area + color are set and the color is found in the area
@@ -910,17 +1003,48 @@ FindAndClickColor(targetColor, colorVariation, useFullScreen := false) {
     return true
 }
 
-; --- When running: if full do banking sequence, else try to fish ---
-; Run banking checks every 1 s when full so we advance through nav/deposit steps; fishing every 3 s
+; --- When running: if full do banking or powerfish drop; else try to fish ---
 DoFishingOrBanking() {
-    ; Keep running banking until BankingStep is 0 (return complete). Otherwise we stop at deposit and never return.
-    if (IsInventoryFull || BankingStep > 0) {
+    global FishingMode
+    ; Banking: run when full or mid-return (BankingStep > 0). Powerfishing: run ONLY when full.
+    ; When Powerfishing we never run banking; when Banking we run until return is done.
+    runBanking := (FishingMode = "Banking") && (IsInventoryFull || BankingStep > 0)
+    runPowerfish := (FishingMode = "Powerfishing") && IsInventoryFull
+    if (runBanking) {
         TryBankWhenFull()
+        SetTimer(DoFishingOrBanking, 1000)
+    } else if (runPowerfish) {
+        TryPowerfishWhenFull()
         SetTimer(DoFishingOrBanking, 1000)
     } else {
         TryFishWhenNotFishing()
         SetTimer(DoFishingOrBanking, FishInterval)
     }
+}
+
+; --- Powerfishing: shift+click each item slot with jitter and delay, then back to fishing ---
+TryPowerfishWhenFull() {
+    global PowerfishSlots, PowerfishLastDropAt, PowerfishDropCooldownMs
+    global PowerfishClickDelayMin, PowerfishClickDelayMax, PowerfishJitter
+    if (PowerfishSlots.Length = 0) {
+        ToolTip("Powerfishing: Add slot positions (Ctrl+Shift+A). Clear with Ctrl+Shift+Z.")
+        SetTimer(() => ToolTip(), 4000)
+        return
+    }
+    if (A_TickCount - PowerfishLastDropAt < PowerfishDropCooldownMs)
+        return
+    for slot in PowerfishSlots {
+        jx := slot[1] + Random(-PowerfishJitter, PowerfishJitter)
+        jy := slot[2] + Random(-PowerfishJitter, PowerfishJitter)
+        MouseMove(jx, jy)
+        Send("{Shift down}")
+        Sleep(80)   ; hold shift long enough for game to register before click
+        Click()
+        Sleep(50)   ; keep shift held briefly after click so it registers as shift+click
+        Send("{Shift up}")
+        Sleep(Random(PowerfishClickDelayMin, PowerfishClickDelayMax))
+    }
+    PowerfishLastDropAt := A_TickCount
 }
 
 ; --- Banking mode: nav1 -> wait 3–5 s -> nav2 -> wait 3–5 s -> deposit -> wait 5–7 s -> done ---
