@@ -39,7 +39,7 @@ global InvSlotOverlayGuis := []
 global InvSlotCornerSize := 8
 
 ; Targeting (fishing spot click)
-global FishInterval := 3000        ; ms between fishing attempts when not fishing
+global FishInterval := 1000        ; ms between fishing attempts when not fishing (fast now that we use green indicator)
 global LastFishClickTime := 0      ; tick when we last clicked a fishing spot
 global LastFishClickCooldownMs := 0 ; ms to wait after that click (random 5–10 s when we clicked)
 global FishClickCooldownMin := 5000 ; ms min wait after fish click
