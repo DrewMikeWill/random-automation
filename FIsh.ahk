@@ -49,6 +49,9 @@ global ClickJitter := 2
 global ClickDelayMs := 35
 global BoundsScanStep := 2
 global BoundsMaxDist := 50
+; Fishing spot / nav: use centroid of matching pixels in a tile-sized window (click tile center, not border)
+global FishSpotCentroidRadius := 28 ; half-width of search window around first hit (~56px tile)
+global FishSpotCentroidStep := 4   ; sample every N pixels for centroid (4 = fast, 2 = more accurate)
 
 ; Run duration (0 = unlimited)
 global RunDurationMinutes := 0
@@ -896,10 +899,12 @@ SwapColorBGR(c) {
 
 ; --- Find color in area and click center of matching region; returns true if found and clicked ---
 ; No coordinates stored: we PixelSearch for the color each time (so moving targets like nav tiles work).
-; useFullScreen=true: search full screen; false = search play area only (fishing and banking both use play area)
-FindAndClickColor(targetColor, colorVariation, useFullScreen := false) {
+; useFullScreen=true: search full screen; false = search play area only.
+; useCentroid=true (fishing spot only): sample all matching pixels in a tile-sized window and click their centroid (tile center, not border).
+FindAndClickColor(targetColor, colorVariation, useFullScreen := false, useCentroid := false) {
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global RadiusStep, ClickJitter, ClickDelayMs, BoundsScanStep, BoundsMaxDist
+    global FishSpotCentroidRadius, FishSpotCentroidStep
     if (targetColor = "")
         return false
     if (useFullScreen) {
@@ -936,60 +941,96 @@ FindAndClickColor(targetColor, colorVariation, useFullScreen := false) {
     }
     if (radius > maxR)
         return false
-    minX := foundX
-    maxX := foundX
-    minY := foundY
-    maxY := foundY
-    limitL := Max(paX1, foundX - BoundsMaxDist)
-    limitR := Min(paX2, foundX + BoundsMaxDist)
-    limitT := Max(paY1, foundY - BoundsMaxDist)
-    limitB := Min(paY2, foundY + BoundsMaxDist)
-    x := foundX - BoundsScanStep
-    while (x >= limitL) {
-        try {
-            if ColorsMatch(PixelGetColor(x, foundY, "RGB"), targetColor, colorVariation)
-                minX := x
-            else
+
+    ; When useCentroid (fishing spot): sample all matching pixels in a tile-sized window; click their centroid = tile center
+    if (useCentroid) {
+        x1 := Max(paX1, foundX - FishSpotCentroidRadius)
+        y1 := Max(paY1, foundY - FishSpotCentroidRadius)
+        x2 := Min(paX2, foundX + FishSpotCentroidRadius)
+        y2 := Min(paY2, foundY + FishSpotCentroidRadius)
+        sumX := 0
+        sumY := 0
+        count := 0
+        y := y1
+        while (y <= y2) {
+            x := x1
+            while (x <= x2) {
+                try {
+                    if ColorsMatch(PixelGetColor(x, y, "RGB"), targetColor, colorVariation) {
+                        sumX += x
+                        sumY += y
+                        count++
+                    }
+                } catch
+                    {}
+                x += FishSpotCentroidStep
+            }
+            y += FishSpotCentroidStep
+        }
+        if (count > 0) {
+            clickX := sumX // count
+            clickY := sumY // count
+        } else {
+            clickX := foundX
+            clickY := foundY
+        }
+    } else {
+        ; Original: expand bbox along cross from first hit, click bbox center
+        minX := foundX
+        maxX := foundX
+        minY := foundY
+        maxY := foundY
+        limitL := Max(paX1, foundX - BoundsMaxDist)
+        limitR := Min(paX2, foundX + BoundsMaxDist)
+        limitT := Max(paY1, foundY - BoundsMaxDist)
+        limitB := Min(paY2, foundY + BoundsMaxDist)
+        x := foundX - BoundsScanStep
+        while (x >= limitL) {
+            try {
+                if ColorsMatch(PixelGetColor(x, foundY, "RGB"), targetColor, colorVariation)
+                    minX := x
+                else
+                    break
+            } catch
                 break
-        } catch
-            break
-        x -= BoundsScanStep
-    }
-    x := foundX + BoundsScanStep
-    while (x <= limitR) {
-        try {
-            if ColorsMatch(PixelGetColor(x, foundY, "RGB"), targetColor, colorVariation)
-                maxX := x
-            else
+            x -= BoundsScanStep
+        }
+        x := foundX + BoundsScanStep
+        while (x <= limitR) {
+            try {
+                if ColorsMatch(PixelGetColor(x, foundY, "RGB"), targetColor, colorVariation)
+                    maxX := x
+                else
+                    break
+            } catch
                 break
-        } catch
-            break
-        x += BoundsScanStep
-    }
-    y := foundY - BoundsScanStep
-    while (y >= limitT) {
-        try {
-            if ColorsMatch(PixelGetColor(foundX, y, "RGB"), targetColor, colorVariation)
-                minY := y
-            else
+            x += BoundsScanStep
+        }
+        y := foundY - BoundsScanStep
+        while (y >= limitT) {
+            try {
+                if ColorsMatch(PixelGetColor(foundX, y, "RGB"), targetColor, colorVariation)
+                    minY := y
+                else
+                    break
+            } catch
                 break
-        } catch
-            break
-        y -= BoundsScanStep
-    }
-    y := foundY + BoundsScanStep
-    while (y <= limitB) {
-        try {
-            if ColorsMatch(PixelGetColor(foundX, y, "RGB"), targetColor, colorVariation)
-                maxY := y
-            else
+            y -= BoundsScanStep
+        }
+        y := foundY + BoundsScanStep
+        while (y <= limitB) {
+            try {
+                if ColorsMatch(PixelGetColor(foundX, y, "RGB"), targetColor, colorVariation)
+                    maxY := y
+                else
+                    break
+            } catch
                 break
-        } catch
-            break
-        y += BoundsScanStep
+            y += BoundsScanStep
+        }
+        clickX := (minX + maxX) // 2
+        clickY := (minY + maxY) // 2
     }
-    clickX := (minX + maxX) // 2
-    clickY := (minY + maxY) // 2
     if (ClickJitter > 0) {
         clickX += Random(-ClickJitter, ClickJitter)
         clickY += Random(-ClickJitter, ClickJitter)
@@ -1061,9 +1102,9 @@ TryBankWhenFull() {
         path1 := A_ScriptDir "\nav1.png"
         ok := FindAndClickImage(path1, BankingImageOffset)
         if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false)
+            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false, true)
         if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false)
+            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false, true)
         if (ok) {
             BankingStep := 2
             BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
@@ -1084,9 +1125,9 @@ TryBankWhenFull() {
         path2 := A_ScriptDir "\nav2.png"
         ok := FindAndClickImage(path2, BankingImageOffset)
         if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false)
+            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false, true)
         if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false)
+            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false, true)
         if (ok) {
             BankingStep := 4
             BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
@@ -1159,9 +1200,9 @@ TryBankWhenFull() {
         path2 := A_ScriptDir "\nav2.png"
         ok := FindAndClickImage(path2, BankingImageOffset)
         if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false)
+            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false, true)
         if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false)
+            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false, true)
         if (ok) {
             BankingStep := 8
             BankWaitUntil := A_TickCount + Random(BankReturnNav2WaitMin, BankReturnNav2WaitMax)
@@ -1181,9 +1222,9 @@ TryBankWhenFull() {
         path1 := A_ScriptDir "\nav1.png"
         ok := FindAndClickImage(path1, BankingImageOffset)
         if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false)
+            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false, true)
         if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false)
+            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false, true)
         if (ok) {
             BankingStep := 10
             BankWaitUntil := A_TickCount + Random(BankReturnNav1WaitMin, BankReturnNav1WaitMax)
@@ -1213,7 +1254,7 @@ TryFishWhenNotFishing() {
     ; After clicking a fishing spot, wait 5–10 s before clicking again (does not affect other clicks)
     if (LastFishClickTime > 0 && (A_TickCount - LastFishClickTime) < LastFishClickCooldownMs)
         return
-    if FindAndClickColor(FishingSpotColor, ColorVariation) {
+    if FindAndClickColor(FishingSpotColor, ColorVariation, false, true) {
         LastFishClickTime := A_TickCount
         LastFishClickCooldownMs := Random(FishClickCooldownMin, FishClickCooldownMax)
     }
