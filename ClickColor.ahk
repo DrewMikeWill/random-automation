@@ -44,6 +44,10 @@ global ClickDelayMs := 35         ; ms over target before click (game needs to s
 global BoundsScanStep := 2        ; step when finding highlight edges (bounding box)
 global BoundsMaxDist := 50       ; max px from first pixel when finding edges (keeps one NPC)
 
+; Run duration (0 = unlimited)
+global RunDurationMinutes := 0
+global RunStartTime := 0
+
 CoordMode("Pixel", "Screen")
 CoordMode("Mouse", "Screen")
 
@@ -54,6 +58,7 @@ LoadConfig() {
     global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
+    global RunDurationMinutes
     try {
         if FileExist(ConfigPath) {
             c := IniRead(ConfigPath, "Settings", "Color", "")
@@ -80,12 +85,60 @@ LoadConfig() {
             WatchRegionY1 := Integer(IniRead(ConfigPath, "WatchRegion", "Y1", "0"))
             WatchRegionX2 := Integer(IniRead(ConfigPath, "WatchRegion", "X2", "0"))
             WatchRegionY2 := Integer(IniRead(ConfigPath, "WatchRegion", "Y2", "0"))
+            RunDurationMinutes := Integer(IniRead(ConfigPath, "Settings", "RunDurationMinutes", "0"))
+            if (RunDurationMinutes < 0)
+                RunDurationMinutes := 0
         }
     } catch {
         TargetColor := ""
     }
 }
 LoadConfig()
+
+; --- Status menu (small, top-right, always on top) ---
+global StatusGui := ""
+
+BuildStatusGui() {
+    global StatusGui, RunDurationMinutes
+    StatusGui := Gui("+AlwaysOnTop -MaximizeBox -MinimizeBox +ToolWindow")
+    StatusGui.BackColor := "1e1e1e"
+    StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
+    StatusGui.Add("Text", "vStatusText", "Auto Fighter  |  Paused  |  Out of combat")
+    StatusGui.Add("Text", "Section", "Run (min):")
+    StatusGui.Add("Edit", "vRunMinutes xs+58 ys-2 w44", String(RunDurationMinutes))
+    StatusGui.Add("Text", "xs+106 ys-2", "0 = unlimited")
+    StatusGui.MarginX := 12
+    StatusGui.MarginY := 8
+    x := A_ScreenWidth - 280
+    y := 10
+    StatusGui.Show("x" x " y" y " NoActivate")
+}
+
+UpdateStatusGui() {
+    global StatusGui, IsRunning, InCombat, RunDurationMinutes, RunStartTime, ConfigPath
+    if !StatusGui
+        return
+    ; Auto-stop when run duration reached
+    if (IsRunning && RunDurationMinutes > 0) {
+        elapsedMin := (A_TickCount - RunStartTime) / 60000
+        if (elapsedMin >= RunDurationMinutes) {
+            PauseClicker()
+            ToolTip("Run duration reached (" RunDurationMinutes " min).")
+            SetTimer(() => ToolTip(), 3000)
+            return
+        }
+    }
+    runText := IsRunning ? "Running" : "Paused"
+    combatText := InCombat ? "In combat" : "Out of combat"
+    try
+        StatusGui["StatusText"].Value := "Auto Fighter  |  " runText "  |  " combatText
+    catch
+        {}
+}
+
+; Build and show status window; refresh every 500 ms
+BuildStatusGui()
+SetTimer(UpdateStatusGui, 500)
 
 ; --- Hotkeys ---
 ^+q:: StartClicker()
@@ -101,17 +154,26 @@ LoadConfig()
 
 ; --- Start ---
 StartClicker() {
-    global TargetColor, IsRunning
+    global TargetColor, IsRunning, RunDurationMinutes, RunStartTime, StatusGui, ConfigPath
     if (TargetColor = "") {
         MsgBox("No highlight color set. Move cursor over the monster highlight and press Ctrl+Shift+C.", "ClickColor", "Icon!")
         return
     }
     if IsRunning
         return
+    ; Read run duration from UI and save
+    try {
+        RunDurationMinutes := Integer(StatusGui["RunMinutes"].Value)
+        if (RunDurationMinutes < 0)
+            RunDurationMinutes := 0
+        IniWrite(String(RunDurationMinutes), ConfigPath, "Settings", "RunDurationMinutes")
+    } catch
+        {}
+    RunStartTime := A_TickCount
     IsRunning := true
     SetTimer(UpdateInCombatState, 500)
     SetTimer(TryAttackWhenOutOfCombat, AttackInterval)
-    ToolTip("Auto fighter: Running")
+    ToolTip("Auto fighter: Running" (RunDurationMinutes > 0 ? " (" RunDurationMinutes " min)" : ""))
     SetTimer(() => ToolTip(), 2000)
 }
 
