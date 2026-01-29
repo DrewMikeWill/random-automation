@@ -19,19 +19,30 @@ global InCombat := false
 global LastInCombatSeen := 0
 global OutOfCombatDelay := 2000      ; ms without both indicators = out of combat
 
+; Optional: combat = drastic change in watch region vs previous check; no drastic change for 3s = out of combat
+global WatchRegionX1 := 0            ; top-left of area to watch (set with Ctrl+Shift+Y / U)
+global WatchRegionY1 := 0
+global WatchRegionX2 := 0            ; bottom-right
+global WatchRegionY2 := 0
+global LastSample := Map()          ; previous frame's colors (compared each tick, no fixed baseline)
+global WatchSampleStep := 6         ; sample every N pixels
+global ChangePctThreshold := 0.05     ; this fraction of pixels must change drastically = in combat (e.g. 5%)
+global DrasticChangeThreshold := 25 ; per-channel; pixel "drastically changed" if diff > this (ignores small wobble)
+global ChangeDetectionOutDelay := 3000 ; ms with no drastic change = out of combat (3 seconds)
+
 ; Play area – only search/click inside this rect (0,0,0,0 = full screen)
 global PlayAreaX1 := 0              ; top-left X
 global PlayAreaY1 := 0              ; top-left Y
 global PlayAreaX2 := 0              ; bottom-right X
 global PlayAreaY2 := 0              ; bottom-right Y
 
-; Targeting (keep blob small/coarse so each attempt is fast – was 70/2 = 20+ sec per click)
-global BlobScanSize := 24            ; small box around first hit for centroid (px)
-global BlobScanStep := 4             ; coarse step = fewer PixelGetColor calls
-global MinBlobPixels := 3            ; else click first pixel found
+; Targeting
 global AttackInterval := 5000       ; ms between attack attempts when out of combat (5 seconds)
 global RadiusStep := 120             ; px step when searching for color (larger = find faster)
-global InwardOffset := 15           ; nudge click this many px toward play-area center (stops "clicking through" NPCs)
+global ClickJitter := 2            ; small ±2 px random (0 = none)
+global ClickDelayMs := 35         ; ms over target before click (game needs to see hover)
+global BoundsScanStep := 2        ; step when finding highlight edges (bounding box)
+global BoundsMaxDist := 50       ; max px from first pixel when finding edges (keeps one NPC)
 
 CoordMode("Pixel", "Screen")
 CoordMode("Mouse", "Screen")
@@ -42,6 +53,7 @@ LoadConfig() {
     global InCombatCheckX, InCombatCheckY, InCombatCheckColor, InCombatCheckBox
     global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
     try {
         if FileExist(ConfigPath) {
             c := IniRead(ConfigPath, "Settings", "Color", "")
@@ -64,6 +76,10 @@ LoadConfig() {
             PlayAreaY1 := Integer(IniRead(ConfigPath, "PlayArea", "Y1", "0"))
             PlayAreaX2 := Integer(IniRead(ConfigPath, "PlayArea", "X2", "0"))
             PlayAreaY2 := Integer(IniRead(ConfigPath, "PlayArea", "Y2", "0"))
+            WatchRegionX1 := Integer(IniRead(ConfigPath, "WatchRegion", "X1", "0"))
+            WatchRegionY1 := Integer(IniRead(ConfigPath, "WatchRegion", "Y1", "0"))
+            WatchRegionX2 := Integer(IniRead(ConfigPath, "WatchRegion", "X2", "0"))
+            WatchRegionY2 := Integer(IniRead(ConfigPath, "WatchRegion", "Y2", "0"))
         }
     } catch {
         TargetColor := ""
@@ -80,6 +96,8 @@ LoadConfig()
 ^+r:: SetInCombatCheck2()            ; set in-combat indicator 2 (both must be present)
 ^+b:: SetPlayAreaTopLeft()           ; set play area top-left corner
 ^+n:: SetPlayAreaBottomRight()      ; set play area bottom-right corner
+^+y:: SetWatchRegionTopLeft()       ; set watch region top-left (drastic change = in combat)
+^+u:: SetWatchRegionBottomRight()   ; set watch region bottom-right
 
 ; --- Start ---
 StartClicker() {
@@ -194,21 +212,93 @@ SetPlayAreaBottomRight() {
     SetTimer(() => ToolTip(), 2000)
 }
 
-; --- Every 500 ms: in combat only when BOTH exact pixels match the set colors ---
-; Only checks the exact coordinates you set (Ctrl+Shift+E and Ctrl+Shift+R) – no search box.
+; --- Watch region: drastic change vs previous check = in combat; no change for 3s = out of combat ---
+SetWatchRegionTopLeft() {
+    global WatchRegionX1, WatchRegionY1, ConfigPath
+    MouseGetPos(&mx, &my)
+    WatchRegionX1 := mx
+    WatchRegionY1 := my
+    try {
+        IniWrite(String(mx), ConfigPath, "WatchRegion", "X1")
+        IniWrite(String(my), ConfigPath, "WatchRegion", "Y1")
+    } catch
+        {}
+    ToolTip("Watch region TOP-LEFT at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SetWatchRegionBottomRight() {
+    global WatchRegionX2, WatchRegionY2, ConfigPath
+    MouseGetPos(&mx, &my)
+    WatchRegionX2 := mx
+    WatchRegionY2 := my
+    try {
+        IniWrite(String(mx), ConfigPath, "WatchRegion", "X2")
+        IniWrite(String(my), ConfigPath, "WatchRegion", "Y2")
+    } catch
+        {}
+    ToolTip("Watch region BOTTOM-RIGHT at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+; --- Every 500 ms: in combat = (watch region set) drastic change vs last check, else two-pixel check ---
 UpdateInCombatState() {
     global InCombat, LastInCombatSeen, OutOfCombatDelay
     global InCombatCheckX, InCombatCheckY, InCombatCheckColor
     global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color
     global InCombatCheckVariation
+    global LastSample, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
+    global WatchSampleStep, ChangePctThreshold, DrasticChangeThreshold, ChangeDetectionOutDelay
+
+    ; If watch region is set: compare current frame to previous frame; drastic change = in combat
+    if (WatchRegionX2 > WatchRegionX1 && WatchRegionY2 > WatchRegionY1) {
+        current := Map()
+        y := WatchRegionY1
+        while (y <= WatchRegionY2) {
+            x := WatchRegionX1
+            while (x <= WatchRegionX2) {
+                key := x "," y
+                try
+                    current[key] := PixelGetColor(x, y, "RGB")
+                catch
+                    {}
+                x += WatchSampleStep
+            }
+            y += WatchSampleStep
+        }
+        changed := 0
+        total := 0
+        for key, curColor in current {
+            total++
+            if LastSample.Has(key) {
+                prevColor := LastSample[key]
+                if !ColorsMatch(curColor, prevColor, DrasticChangeThreshold)
+                    changed++
+            }
+        }
+        ; Keep this frame as "previous" for next run (copy so we don't share reference)
+        LastSample := Map()
+        for k, v in current
+            LastSample[k] := v
+        if (total > 0) {
+            pct := changed / total
+            if (pct >= ChangePctThreshold) {
+                InCombat := true
+                LastInCombatSeen := A_TickCount
+            } else if (A_TickCount - LastInCombatSeen > ChangeDetectionOutDelay) {
+                InCombat := false
+            }
+        }
+        return
+    }
+
+    ; Else: two exact-pixel indicators (both must match)
     if (InCombatCheckColor = "" || InCombatCheck2Color = "")
         return
-    ; Exact pixel at indicator 1
     try
         c1 := PixelGetColor(InCombatCheckX, InCombatCheckY, "RGB")
     catch
         c1 := 0
-    ; Exact pixel at indicator 2
     try
         c2 := PixelGetColor(InCombatCheck2X, InCombatCheck2Y, "RGB")
     catch
@@ -226,11 +316,10 @@ UpdateInCombatState() {
 ; --- When out of combat: find color and click (only inside play area, kept fast) ---
 TryAttackWhenOutOfCombat() {
     global InCombat, TargetColor, ColorVariation
-    global BlobScanSize, BlobScanStep, MinBlobPixels, RadiusStep, InwardOffset
+    global RadiusStep, ClickJitter, ClickDelayMs, BoundsScanStep, BoundsMaxDist
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     if InCombat || (TargetColor = "")
         return
-    ; Use play area if set, else full screen
     paX1 := PlayAreaX1
     paY1 := PlayAreaY1
     paX2 := PlayAreaX2
@@ -243,7 +332,7 @@ TryAttackWhenOutOfCombat() {
     }
     cx := (paX1 + paX2) // 2
     cy := (paY1 + paY2) // 2
-    ; Find first matching pixel from center outward (larger step = fewer slow PixelSearch calls)
+    ; Find first matching pixel from center outward
     radius := 0
     maxR := Max(paX2 - paX1, paY2 - paY1) // 2 + RadiusStep
     foundX := 0
@@ -260,50 +349,72 @@ TryAttackWhenOutOfCombat() {
     }
     if (radius > maxR)
         return
-    ; Small fast blob scan for centroid (24x24 box, step 4 = ~49 PixelGetColor calls only)
-    bx1 := Max(paX1, foundX - BlobScanSize)
-    by1 := Max(paY1, foundY - BlobScanSize)
-    bx2 := Min(paX2, foundX + BlobScanSize)
-    by2 := Min(paY2, foundY + BlobScanSize)
-    sumX := 0
-    sumY := 0
-    count := 0
-    y := by1
-    while (y <= by2) {
-        x := bx1
-        while (x <= bx2) {
-            try {
-                c := PixelGetColor(x, y, "RGB")
-                if ColorsMatch(c, TargetColor, ColorVariation) {
-                    sumX += x
-                    sumY += y
-                    count++
-                }
-            } catch
-                continue
-            x += BlobScanStep
-        }
-        y += BlobScanStep
+    ; Bounding box: from first pixel, find edges of same-colored region (OSRS AHK style – click inside the highlight)
+    minX := foundX
+    maxX := foundX
+    minY := foundY
+    maxY := foundY
+    limitL := Max(paX1, foundX - BoundsMaxDist)
+    limitR := Min(paX2, foundX + BoundsMaxDist)
+    limitT := Max(paY1, foundY - BoundsMaxDist)
+    limitB := Min(paY2, foundY + BoundsMaxDist)
+    x := foundX - BoundsScanStep
+    while (x >= limitL) {
+        try {
+            if ColorsMatch(PixelGetColor(x, foundY, "RGB"), TargetColor, ColorVariation)
+                minX := x
+            else
+                break
+        } catch
+            break
+        x -= BoundsScanStep
     }
-    if (count >= MinBlobPixels) {
-        clickX := sumX // count
-        clickY := sumY // count
-    } else {
-        clickX := foundX
-        clickY := foundY
+    x := foundX + BoundsScanStep
+    while (x <= limitR) {
+        try {
+            if ColorsMatch(PixelGetColor(x, foundY, "RGB"), TargetColor, ColorVariation)
+                maxX := x
+            else
+                break
+        } catch
+            break
+        x += BoundsScanStep
     }
-    ; Nudge click toward play-area center so it lands on NPC body, not through the outline
-    centerX := (paX1 + paX2) // 2
-    centerY := (paY1 + paY2) // 2
-    dx := centerX - clickX
-    dy := centerY - clickY
-    len := Sqrt(dx*dx + dy*dy)
-    if (len > 0) {
-        nudge := Min(InwardOffset, len)
-        clickX += Round(dx * nudge / len)
-        clickY += Round(dy * nudge / len)
+    y := foundY - BoundsScanStep
+    while (y >= limitT) {
+        try {
+            if ColorsMatch(PixelGetColor(foundX, y, "RGB"), TargetColor, ColorVariation)
+                minY := y
+            else
+                break
+        } catch
+            break
+        y -= BoundsScanStep
     }
-    Click(clickX, clickY)
+    y := foundY + BoundsScanStep
+    while (y <= limitB) {
+        try {
+            if ColorsMatch(PixelGetColor(foundX, y, "RGB"), TargetColor, ColorVariation)
+                maxY := y
+            else
+                break
+        } catch
+            break
+        y += BoundsScanStep
+    }
+    ; Click center of bounding box (guaranteed inside the highlight, not through it)
+    clickX := (minX + maxX) // 2
+    clickY := (minY + maxY) // 2
+    if (ClickJitter > 0) {
+        clickX += Random(-ClickJitter, ClickJitter)
+        clickY += Random(-ClickJitter, ClickJitter)
+    }
+    clickX := Max(paX1, Min(paX2, clickX))
+    clickY := Max(paY1, Min(paY2, clickY))
+    MouseMove(clickX, clickY)
+    if (ClickDelayMs > 0)
+        Sleep(ClickDelayMs)
+    Click()
 }
 
 ; Compare two 0xRRGGBB colors within variation per channel
