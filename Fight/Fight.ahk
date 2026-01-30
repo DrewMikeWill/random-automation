@@ -6,30 +6,19 @@ global IsRunning := false
 global ColorVariation := 20           ; color tolerance for highlight (0–255, raise if not matching)
 global ConfigPath := A_ScriptDir "\Fight.ini"
 
-; In-combat detection – BOTH indicators must be present to be in combat
-global InCombatCheckX := 0
-global InCombatCheckY := 0
-global InCombatCheckColor := ""
-global InCombatCheck2X := 0
-global InCombatCheck2Y := 0
-global InCombatCheck2Color := ""
-global InCombatCheckVariation := 10   ; tolerance for indicator colors
-global InCombatCheckBox := 25         ; check ±25 px around each set point
+; In-combat detection – area + color (like Cook cooking status: color exists in area = in combat)
+global InCombatAreaX1 := 0
+global InCombatAreaY1 := 0
+global InCombatAreaX2 := 0
+global InCombatAreaY2 := 0
+global InCombatColor := ""
+global InCombatVariation := 10
 global InCombat := false
 global LastInCombatSeen := 0
-global OutOfCombatDelay := 2000      ; ms without both indicators = out of combat
-global CombatCheckInterval := 250   ; ms between in-combat checks (smaller = more responsive)
-
-; Optional: combat = drastic change in watch region vs previous check; no drastic change for 3s = out of combat
-global WatchRegionX1 := 0            ; top-left of area to watch (set with Ctrl+Shift+Y / U)
-global WatchRegionY1 := 0
-global WatchRegionX2 := 0            ; bottom-right
-global WatchRegionY2 := 0
-global LastSample := Map()          ; previous frame's colors (compared each tick, no fixed baseline)
-global WatchSampleStep := 6         ; sample every N pixels
-global ChangePctThreshold := 0.05     ; this fraction of pixels must change drastically = in combat (e.g. 5%)
-global DrasticChangeThreshold := 25 ; per-channel; pixel "drastically changed" if diff > this (ignores small wobble)
-global ChangeDetectionOutDelay := 3000 ; ms with no drastic change = out of combat (3 seconds)
+global OutOfCombatDelay := 2000      ; ms without color in area = out of combat
+global CombatCheckInterval := 250   ; ms between in-combat checks
+global InCombatAreaOverlayGuis := []
+global InCombatCornerSize := 12
 
 ; Play area – only search/click inside this rect (0,0,0,0 = full screen)
 global PlayAreaX1 := 0              ; top-left X
@@ -38,8 +27,6 @@ global PlayAreaX2 := 0              ; bottom-right X
 global PlayAreaY2 := 0              ; bottom-right Y
 global PlayAreaOverlayGuis := []    ; up to 8 small red-line windows
 global CornerMarkSize := 30         ; px length of each leg of the L (play area)
-global WatchRegionOverlayGuis := [] ; up to 8 small yellow-line windows (combat check area)
-global WatchCornerMarkSize := 12   ; px length of each leg (smaller than play area)
 
 ; Targeting
 global AttackInterval := 5000       ; ms between attack attempts when out of combat (5 seconds)
@@ -59,37 +46,25 @@ CoordMode("Mouse", "Screen")
 ; --- Load config ---
 LoadConfig() {
     global TargetColor, ConfigPath
-    global InCombatCheckX, InCombatCheckY, InCombatCheckColor, InCombatCheckBox
-    global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color
+    global InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
-    global WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
     global RunDurationMinutes
     try {
         if FileExist(ConfigPath) {
             c := IniRead(ConfigPath, "Settings", "Color", "")
             if (c != "")
                 TargetColor := "0x" c
-            InCombatCheckX := Integer(IniRead(ConfigPath, "InCombat", "X", "0"))
-            InCombatCheckY := Integer(IniRead(ConfigPath, "InCombat", "Y", "0"))
+            InCombatAreaX1 := Integer(IniRead(ConfigPath, "InCombat", "X1", "0"))
+            InCombatAreaY1 := Integer(IniRead(ConfigPath, "InCombat", "Y1", "0"))
+            InCombatAreaX2 := Integer(IniRead(ConfigPath, "InCombat", "X2", "0"))
+            InCombatAreaY2 := Integer(IniRead(ConfigPath, "InCombat", "Y2", "0"))
             ic := IniRead(ConfigPath, "InCombat", "Color", "")
             if (ic != "")
-                InCombatCheckColor := "0x" ic
-            ib := IniRead(ConfigPath, "InCombat", "Box", "")
-            if (ib != "")
-                InCombatCheckBox := Integer(ib)
-            InCombatCheck2X := Integer(IniRead(ConfigPath, "InCombat2", "X", "0"))
-            InCombatCheck2Y := Integer(IniRead(ConfigPath, "InCombat2", "Y", "0"))
-            ic2 := IniRead(ConfigPath, "InCombat2", "Color", "")
-            if (ic2 != "")
-                InCombatCheck2Color := "0x" ic2
+                InCombatColor := "0x" ic
             PlayAreaX1 := Integer(IniRead(ConfigPath, "PlayArea", "X1", "0"))
             PlayAreaY1 := Integer(IniRead(ConfigPath, "PlayArea", "Y1", "0"))
             PlayAreaX2 := Integer(IniRead(ConfigPath, "PlayArea", "X2", "0"))
             PlayAreaY2 := Integer(IniRead(ConfigPath, "PlayArea", "Y2", "0"))
-            WatchRegionX1 := Integer(IniRead(ConfigPath, "WatchRegion", "X1", "0"))
-            WatchRegionY1 := Integer(IniRead(ConfigPath, "WatchRegion", "Y1", "0"))
-            WatchRegionX2 := Integer(IniRead(ConfigPath, "WatchRegion", "X2", "0"))
-            WatchRegionY2 := Integer(IniRead(ConfigPath, "WatchRegion", "Y2", "0"))
             RunDurationMinutes := Integer(IniRead(ConfigPath, "Settings", "RunDurationMinutes", "0"))
             if (RunDurationMinutes < 0)
                 RunDurationMinutes := 0
@@ -100,95 +75,95 @@ LoadConfig() {
 }
 LoadConfig()
 
-; --- Status menu (small, top-right, always on top) ---
+; --- Status GUI (Cook-style: dark theme, Action/Debug Edit, config checkmarks) ---
 global StatusGui := ""
+global FightStatusAction := ""
+global FightDebugLine := ""
+
+SetGuiText(ctrl, str) {
+    try
+        ctrl.Text := str
+    catch {
+        try
+            ctrl.Value := str
+        catch {
+        }
+    }
+}
 
 BuildStatusGui() {
     global StatusGui, RunDurationMinutes
     StatusGui := Gui("+AlwaysOnTop -MaximizeBox -MinimizeBox +ToolWindow")
     StatusGui.BackColor := "1e1e1e"
     StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
-    StatusGui.Add("Text", "vStatusText", "Auto Fighter  |  Paused  |  Out of combat")
-    StatusGui.Add("Text", "vTimerText", "Pause in: —")
-    StatusGui.Add("Text", "vSetText", "Color —  Play —  Combat —  Watch —")
-    StatusGui.Add("Text", "vPlayAreaText", "Play area: —")
-    StatusGui.Add("Text", "Section", "Run (min):")
-    StatusGui.Add("Edit", "vRunMinutes xs+58 ys-2 w44", String(RunDurationMinutes))
-    StatusGui["RunMinutes"].SetFont("cBlack")
-    StatusGui.Add("Text", "xs+106 ys-2", "0 = unlimited")
     StatusGui.MarginX := 12
-    StatusGui.MarginY := 8
-    x := A_ScreenWidth - 320
-    y := 10
-    StatusGui.Show("x" x " y" y " NoActivate")
+    StatusGui.MarginY := 6
+    StatusGui.Add("Text", "Section", "Auto Fighter")
+    StatusGui.Add("Text", "vStatusText xs", "Paused  |  Out of combat")
+    StatusGui.Add("Edit", "vActionText xs ReadOnly r1 w470 Background1e1e1e", "Action: —")
+    StatusGui["ActionText"].SetFont("cA0D0A0")
+    StatusGui.Add("Edit", "vDebugText xs ReadOnly r1 w470 Background1e1e1e", "Debug: —")
+    StatusGui["DebugText"].SetFont("c808080")
+    StatusGui.Add("Text", "vTimerText xs", "Time left: --")
+    StatusGui.Add("Text", "xs Section", "Run (min):")
+    StatusGui.Add("Edit", "vRunMinutes x+6 yp-2 w44", String(RunDurationMinutes))
+    StatusGui["RunMinutes"].SetFont("cBlack")
+    StatusGui.Add("Text", "x+6 yp+2", "0 = unlimited")
+    StatusGui.Add("Text", "xs Section y+8", "Configuration:")
+    StatusGui.Add("Text", "vTargetRow xs y+2", "[—] Target color     Ctrl+Shift+C")
+    StatusGui.Add("Text", "vPlayAreaRow xs", "[—] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
+    StatusGui.Add("Text", "vInCombatRow xs", "[—] In-combat       Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+V (color)")
+    StatusGui.Add("Text", "xs y+8", "Hotkeys:")
+    StatusGui.Add("Text", "vHotkeysRow xs y+2", "Start Ctrl+Shift+Q  |  Pause Ctrl+Shift+W  |  Exit Ctrl+Shift+X")
+    StatusGui.Show("x" (A_ScreenWidth - 520) " y10 NoActivate w500")
 }
 
 UpdateStatusGui() {
-    global StatusGui, IsRunning, InCombat, RunDurationMinutes, RunStartTime, ConfigPath
+    global StatusGui, IsRunning, RunDurationMinutes, RunStartTime, ConfigPath
+    global InCombat, FightStatusAction, FightDebugLine
     global TargetColor, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
-    global InCombatCheckColor, InCombatCheck2Color, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
+    global InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor
     if !StatusGui
         return
-    ; Auto-stop when run duration reached
-    if (IsRunning && RunDurationMinutes > 0 && RunStartTime > 0) {
-        elapsedMs := A_TickCount - RunStartTime
-        elapsedMin := elapsedMs / 60000
-        if (elapsedMin >= RunDurationMinutes) {
-            PauseClicker()
-            ToolTip("Run duration reached (" RunDurationMinutes " min).")
-            SetTimer(() => ToolTip(), 3000)
-            return
-        }
-        ; Show countdown: Pause in: mm:ss
-        remainingMs := (RunDurationMinutes * 60000) - elapsedMs
-        remainingSec := Max(0, Round(remainingMs / 1000))
-        timerMin := remainingSec // 60
-        timerSec := remainingSec - (timerMin * 60)
-        try
-            StatusGui["TimerText"].Value := "Pause in: " timerMin ":" (timerSec < 10 ? "0" : "") timerSec
-        catch
-            {}
-    } else {
-        try
-            StatusGui["TimerText"].Value := "Pause in: —"
-        catch
-            {}
+    try {
+        runMin := Integer(StatusGui["RunMinutes"].Value)
+        if (runMin < 0) runMin := 0
+        if (IsRunning && runMin > 0 && RunStartTime > 0) {
+            elapsed := A_TickCount - RunStartTime
+            if (elapsed >= runMin * 60000) {
+                PauseClicker()
+                ToolTip("Run duration reached (" runMin " min).")
+                SetTimer(() => ToolTip(), 3000)
+                return
+            }
+            rem := (runMin * 60000) - elapsed
+            sec := Max(0, Round(rem / 1000))
+            SetGuiText(StatusGui["TimerText"], "Time left: " (sec // 60) ":" (Format("{:02}", Mod(sec, 60))))
+        } else
+            SetGuiText(StatusGui["TimerText"], "Time left: --")
+    } catch {
+        SetGuiText(StatusGui["TimerText"], "Time left: --")
     }
-    runText := IsRunning ? "Running" : "Paused"
-    combatText := InCombat ? "In combat" : "Out of combat"
-    try
-        StatusGui["StatusText"].Value := "Auto Fighter  |  " runText "  |  " combatText
-    catch
-        {}
-    ; Which variables are set
-    c := (TargetColor != "") ? "Color ✓" : "Color —"
-    playSet := (PlayAreaX2 > PlayAreaX1 && PlayAreaY2 > PlayAreaY1)
-    p := playSet ? "Play ✓" : "Play —"
-    combatSet := (InCombatCheckColor != "" && InCombatCheck2Color != "")
-    cb := combatSet ? "Combat ✓" : "Combat —"
-    watchSet := (WatchRegionX2 > WatchRegionX1 && WatchRegionY2 > WatchRegionY1)
-    w := watchSet ? "Watch ✓" : "Watch —"
-    try
-        StatusGui["SetText"].Value := c "  " p "  " cb "  " w
-    catch
-        {}
-    ; Play area corners
-    if (playSet)
-        try
-            StatusGui["PlayAreaText"].Value := "Play: (" PlayAreaX1 "," PlayAreaY1 ") → (" PlayAreaX2 "," PlayAreaY2 ")"
-        catch
-            {}
-    else
-        try
-            StatusGui["PlayAreaText"].Value := "Play area: —"
-        catch
-            {}
+    runTxt := IsRunning ? "Running" : "Paused"
+    combatTxt := InCombat ? "In combat" : "Out of combat"
+    SetGuiText(StatusGui["StatusText"], runTxt "  |  " combatTxt)
+    actionTxt := FightStatusAction != "" ? FightStatusAction : (IsRunning ? (InCombat ? "In combat — waiting" : "Searching for target") : "Idle")
+    debugTxt := FightDebugLine != "" ? FightDebugLine : ("InCombat=" (InCombat ? "1" : "0"))
+    StatusGui["ActionText"].Value := "Action: " actionTxt
+    StatusGui["DebugText"].Value := "Debug: " debugTxt
+    ; Config checkmarks
+    tSet := (TargetColor != "")
+    pSet := (PlayAreaX2 > PlayAreaX1 && PlayAreaY2 > PlayAreaY1)
+    iSet := (InCombatAreaX2 > InCombatAreaX1 && InCombatAreaY2 > InCombatAreaY1 && InCombatColor != "")
+    SetGuiText(StatusGui["TargetRow"], "[" (tSet ? "✓" : "—") "] Target color     Ctrl+Shift+C")
+    SetGuiText(StatusGui["PlayAreaRow"], "[" (pSet ? "✓" : "—") "] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
+    SetGuiText(StatusGui["InCombatRow"], "[" (iSet ? "✓" : "—") "] In-combat       Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+V (color)")
 }
 
 ; Build and show status window; refresh every 500 ms
 BuildStatusGui()
 BuildPlayAreaOverlay()
-BuildWatchRegionOverlay()
+BuildInCombatAreaOverlay()
 SetTimer(UpdateStatusGui, 500)
 
 ; --- Hotkeys ---
@@ -196,12 +171,11 @@ SetTimer(UpdateStatusGui, 500)
 ^+w:: PauseClicker()
 ^+x:: ExitClicker()
 ^+c:: SetColorUnderCursor()          ; set highlight color (monster)
-^+e:: SetInCombatCheck()             ; set in-combat indicator 1 (cursor position + color)
-^+r:: SetInCombatCheck2()            ; set in-combat indicator 2 (both must be present)
+^+e:: SetInCombatAreaTL()            ; set in-combat area top-left
+^+r:: SetInCombatAreaBR()            ; set in-combat area bottom-right
+^+v:: SetInCombatColor()             ; set in-combat color (color in area = in combat)
 ^+b:: SetPlayAreaTopLeft()           ; set play area top-left corner
 ^+n:: SetPlayAreaBottomRight()      ; set play area bottom-right corner
-^+y:: SetWatchRegionTopLeft()       ; set watch region top-left (drastic change = in combat)
-^+u:: SetWatchRegionBottomRight()   ; set watch region bottom-right
 
 ; --- Start ---
 StartClicker() {
@@ -262,38 +236,45 @@ SetColorUnderCursor() {
     SetTimer(() => ToolTip(), 2000)
 }
 
-; --- Set in-combat indicator 1 ---
-SetInCombatCheck() {
-    global InCombatCheckX, InCombatCheckY, InCombatCheckColor, ConfigPath, InCombatCheckBox
+; --- Set in-combat area (top-left and bottom-right) and color; color in area = in combat ---
+SetInCombatAreaTL() {
+    global InCombatAreaX1, InCombatAreaY1, ConfigPath
     MouseGetPos(&mx, &my)
-    InCombatCheckX := mx
-    InCombatCheckY := my
-    InCombatCheckColor := PixelGetColor(mx, my, "RGB")
+    InCombatAreaX1 := mx
+    InCombatAreaY1 := my
     try {
-        IniWrite(SubStr(InCombatCheckColor, 3), ConfigPath, "InCombat", "Color")
-        IniWrite(String(mx), ConfigPath, "InCombat", "X")
-        IniWrite(String(my), ConfigPath, "InCombat", "Y")
-        IniWrite(String(InCombatCheckBox), ConfigPath, "InCombat", "Box")
-    } catch
-        {}  ; ignore write error
-    ToolTip("Combat indicator 1 set at " mx "," my)
+        IniWrite(String(mx), ConfigPath, "InCombat", "X1")
+        IniWrite(String(my), ConfigPath, "InCombat", "Y1")
+    } catch {
+    }
+    ToolTip("In-combat area TOP-LEFT at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
+    BuildInCombatAreaOverlay()
 }
 
-; --- Set in-combat indicator 2 (both 1 and 2 must be present = in combat) ---
-SetInCombatCheck2() {
-    global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color, ConfigPath, InCombatCheckBox
+SetInCombatAreaBR() {
+    global InCombatAreaX2, InCombatAreaY2, ConfigPath
     MouseGetPos(&mx, &my)
-    InCombatCheck2X := mx
-    InCombatCheck2Y := my
-    InCombatCheck2Color := PixelGetColor(mx, my, "RGB")
+    InCombatAreaX2 := mx
+    InCombatAreaY2 := my
     try {
-        IniWrite(SubStr(InCombatCheck2Color, 3), ConfigPath, "InCombat2", "Color")
-        IniWrite(String(mx), ConfigPath, "InCombat2", "X")
-        IniWrite(String(my), ConfigPath, "InCombat2", "Y")
-    } catch
-        {}  ; ignore write error
-    ToolTip("Combat indicator 2 set at " mx "," my)
+        IniWrite(String(mx), ConfigPath, "InCombat", "X2")
+        IniWrite(String(my), ConfigPath, "InCombat", "Y2")
+    } catch {
+    }
+    ToolTip("In-combat area BOTTOM-RIGHT at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+    BuildInCombatAreaOverlay()
+}
+
+SetInCombatColor() {
+    global InCombatColor, ConfigPath
+    MouseGetPos(&mx, &my)
+    InCombatColor := PixelGetColor(mx, my, "RGB")
+    try IniWrite(SubStr(InCombatColor, 3), ConfigPath, "InCombat", "Color")
+    catch {
+    }
+    ToolTip("In-combat color set at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
 }
 
@@ -363,50 +344,19 @@ BuildPlayAreaOverlay() {
     PlayAreaOverlayGuis.Push(line(PlayAreaX2 - L, PlayAreaY2 - W, L, W))
 }
 
-; --- Watch region: drastic change vs previous check = in combat; no change for 3s = out of combat ---
-SetWatchRegionTopLeft() {
-    global WatchRegionX1, WatchRegionY1, ConfigPath
-    MouseGetPos(&mx, &my)
-    WatchRegionX1 := mx
-    WatchRegionY1 := my
-    try {
-        IniWrite(String(mx), ConfigPath, "WatchRegion", "X1")
-        IniWrite(String(my), ConfigPath, "WatchRegion", "Y1")
-    } catch
-        {}
-    ToolTip("Watch region TOP-LEFT at " mx "," my)
-    SetTimer(() => ToolTip(), 2000)
-    BuildWatchRegionOverlay()
-}
-
-SetWatchRegionBottomRight() {
-    global WatchRegionX2, WatchRegionY2, ConfigPath
-    MouseGetPos(&mx, &my)
-    WatchRegionX2 := mx
-    WatchRegionY2 := my
-    try {
-        IniWrite(String(mx), ConfigPath, "WatchRegion", "X2")
-        IniWrite(String(my), ConfigPath, "WatchRegion", "Y2")
-    } catch
-        {}
-    ToolTip("Watch region BOTTOM-RIGHT at " mx "," my)
-    SetTimer(() => ToolTip(), 2000)
-    BuildWatchRegionOverlay()
-}
-
-; --- Draw small yellow L-shaped corner marks for watch region (combat check area) ---
-BuildWatchRegionOverlay() {
-    global WatchRegionOverlayGuis, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2, WatchCornerMarkSize
-    for overlayWin in WatchRegionOverlayGuis {
+; --- Draw yellow L-shaped corners for in-combat area ---
+BuildInCombatAreaOverlay() {
+    global InCombatAreaOverlayGuis, InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatCornerSize
+    for g in InCombatAreaOverlayGuis {
         try
-            overlayWin.Destroy()
-        catch
-            {}
+            g.Destroy()
+        catch {
+        }
     }
-    WatchRegionOverlayGuis := []
-    if (WatchRegionX2 <= WatchRegionX1 || WatchRegionY2 <= WatchRegionY1)
+    InCombatAreaOverlayGuis := []
+    if (InCombatAreaX2 <= InCombatAreaX1 || InCombatAreaY2 <= InCombatAreaY1)
         return
-    L := WatchCornerMarkSize
+    L := InCombatCornerSize
     W := 2
     line(x, y, w, h) {
         g := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x20")
@@ -414,91 +364,42 @@ BuildWatchRegionOverlay() {
         g.Show("x" x " y" y " w" w " h" h " NoActivate")
         return g
     }
-    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY1, W, L))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY1, L, W))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - W, WatchRegionY1, W, L))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - L, WatchRegionY1, L, W))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY2 - L, W, L))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX1, WatchRegionY2 - W, L, W))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - W, WatchRegionY2 - L, W, L))
-    WatchRegionOverlayGuis.Push(line(WatchRegionX2 - L, WatchRegionY2 - W, L, W))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX1, InCombatAreaY1, W, L))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX1, InCombatAreaY1, L, W))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX2 - W, InCombatAreaY1, W, L))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX2 - L, InCombatAreaY1, L, W))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX1, InCombatAreaY2 - L, W, L))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX1, InCombatAreaY2 - W, L, W))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX2 - W, InCombatAreaY2 - L, W, L))
+    InCombatAreaOverlayGuis.Push(line(InCombatAreaX2 - L, InCombatAreaY2 - W, L, W))
 }
 
-; --- In combat = (watch region set) drastic change vs last check, else two-pixel check ---
+; True if target color exists anywhere in the area (PixelSearch with variation)
+ColorInArea(x1, y1, x2, y2, targetColor, variation) {
+    try
+        return PixelSearch(&ox, &oy, x1, y1, x2, y2, Integer(targetColor), variation)
+    catch
+        return false
+}
+
+; --- In combat = color exists in the defined area (like Cook cooking status) ---
 UpdateInCombatState() {
-    global InCombat, LastInCombatSeen, OutOfCombatDelay
-    global InCombatCheckX, InCombatCheckY, InCombatCheckColor
-    global InCombatCheck2X, InCombatCheck2Y, InCombatCheck2Color
-    global InCombatCheckVariation
-    global LastSample, WatchRegionX1, WatchRegionY1, WatchRegionX2, WatchRegionY2
-    global WatchSampleStep, ChangePctThreshold, DrasticChangeThreshold, ChangeDetectionOutDelay
-
-    ; If watch region is set: compare current frame to previous frame; drastic change = in combat
-    if (WatchRegionX2 > WatchRegionX1 && WatchRegionY2 > WatchRegionY1) {
-        current := Map()
-        y := WatchRegionY1
-        while (y <= WatchRegionY2) {
-            x := WatchRegionX1
-            while (x <= WatchRegionX2) {
-                key := x "," y
-                try
-                    current[key] := PixelGetColor(x, y, "RGB")
-                catch
-                    {}
-                x += WatchSampleStep
-            }
-            y += WatchSampleStep
-        }
-        changed := 0
-        total := 0
-        for key, curColor in current {
-            total++
-            if LastSample.Has(key) {
-                prevColor := LastSample[key]
-                if !ColorsMatch(curColor, prevColor, DrasticChangeThreshold)
-                    changed++
-            }
-        }
-        ; Keep this frame as "previous" for next run (copy so we don't share reference)
-        LastSample := Map()
-        for k, v in current
-            LastSample[k] := v
-        if (total > 0) {
-            pct := changed / total
-            if (pct >= ChangePctThreshold) {
-                InCombat := true
-                LastInCombatSeen := A_TickCount
-            } else if (A_TickCount - LastInCombatSeen > ChangeDetectionOutDelay) {
-                InCombat := false
-            }
-        }
+    global InCombat, LastInCombatSeen, OutOfCombatDelay, FightDebugLine
+    global InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor, InCombatVariation
+    if (InCombatColor = "" || InCombatAreaX2 <= InCombatAreaX1 || InCombatAreaY2 <= InCombatAreaY1)
         return
-    }
-
-    ; Else: two exact-pixel indicators (both must match)
-    if (InCombatCheckColor = "" || InCombatCheck2Color = "")
-        return
-    try
-        c1 := PixelGetColor(InCombatCheckX, InCombatCheckY, "RGB")
-    catch
-        c1 := 0
-    try
-        c2 := PixelGetColor(InCombatCheck2X, InCombatCheck2Y, "RGB")
-    catch
-        c2 := 0
-    match1 := ColorsMatch(c1, InCombatCheckColor, InCombatCheckVariation)
-    match2 := ColorsMatch(c2, InCombatCheck2Color, InCombatCheckVariation)
-    if (match1 && match2) {
+    if (ColorInArea(InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor, InCombatVariation)) {
         InCombat := true
         LastInCombatSeen := A_TickCount
     } else if (A_TickCount - LastInCombatSeen > OutOfCombatDelay) {
         InCombat := false
     }
+    FightDebugLine := "InCombat=" (InCombat ? "1" : "0") " LastSeen=" (A_TickCount - LastInCombatSeen) "ms"
 }
 
 ; --- When out of combat: find color and click (only inside play area, kept fast) ---
 TryAttackWhenOutOfCombat() {
-    global InCombat, TargetColor, ColorVariation
+    global InCombat, TargetColor, ColorVariation, FightStatusAction
     global RadiusStep, ClickJitter, ClickDelayMs, BoundsScanStep, BoundsMaxDist
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     if InCombat || (TargetColor = "")
@@ -530,8 +431,10 @@ TryAttackWhenOutOfCombat() {
         }
         radius += RadiusStep
     }
-    if (radius > maxR)
+    if (radius > maxR) {
+        FightStatusAction := "Searching for target"
         return
+    }
     ; Bounding box: from first pixel, find edges of same-colored region (OSRS AHK style – click inside the highlight)
     minX := foundX
     maxX := foundX
@@ -598,6 +501,7 @@ TryAttackWhenOutOfCombat() {
     if (ClickDelayMs > 0)
         Sleep(ClickDelayMs)
     Click()
+    FightStatusAction := "Clicked target"
 }
 
 ; Compare two 0xRRGGBB colors within variation per channel
