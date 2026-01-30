@@ -4,7 +4,7 @@
 global TargetColor := ""              ; 0xRRGGBB, highlight color to click
 global IsRunning := false
 global ColorVariation := 20           ; color tolerance for highlight (0–255, raise if not matching)
-global ConfigPath := A_ScriptDir "\ClickColor.ini"
+global ConfigPath := A_ScriptDir "\Fight.ini"
 
 ; In-combat detection – BOTH indicators must be present to be in combat
 global InCombatCheckX := 0
