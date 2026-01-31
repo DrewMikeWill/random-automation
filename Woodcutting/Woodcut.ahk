@@ -69,6 +69,8 @@ global BankNav1FailCount := 0
 global BankDepositBoxFailCount := 0
 global MaxNav1Attempts := 5
 global MaxDepositBoxAttempts := 5
+global MaxDepositClickAttempts := 10
+global BankDepositClickCount := 0
 
 ; Main loop interval (faster = snappier when moving)
 global MainLoopInterval := 350
@@ -196,23 +198,27 @@ UpdateStatusGui() {
     global DepositAreaX1, DepositAreaY1, DepositAreaX2, DepositAreaY2, DepositColor
     if !StatusGui
         return
-    try {
+    runMin := 0
+    try
         runMin := Integer(StatusGui["RunMinutes"].Value)
-        if (runMin < 0) runMin := 0
-        if (IsRunning && runMin > 0 && RunStartTime > 0) {
-            elapsed := A_TickCount - RunStartTime
-            if (elapsed >= runMin * 60000) {
-                PauseWoodcut()
-                ToolTip("Run duration reached (" runMin " min).")
-                SetTimer(() => ToolTip(), 3000)
-                return
-            }
-            rem := (runMin * 60000) - elapsed
-            sec := Max(0, Round(rem / 1000))
-            SetGuiText(StatusGui["TimerText"], "Time left: " (sec // 60) ":" (Format("{:02}", Mod(sec, 60))))
-        } else
-            SetGuiText(StatusGui["TimerText"], "Time left: --")
-    } catch
+    catch
+        {}
+    if (runMin < 0)
+        runMin := 0
+    if (IsRunning && runMin = 0 && RunDurationMinutes > 0)
+        runMin := RunDurationMinutes
+    if (IsRunning && runMin > 0 && RunStartTime > 0) {
+        elapsed := A_TickCount - RunStartTime
+        if (elapsed >= runMin * 60000) {
+            PauseWoodcut()
+            ToolTip("Run duration reached (" runMin " min).")
+            SetTimer(() => ToolTip(), 3000)
+            return
+        }
+        rem := (runMin * 60000) - elapsed
+        sec := Max(0, Round(rem / 1000))
+        SetGuiText(StatusGui["TimerText"], "Time left: " (sec // 60) ":" (Format("{:02}", Mod(sec, 60))))
+    } else
         SetGuiText(StatusGui["TimerText"], "Time left: --")
     runTxt := IsRunning ? "Running" : "Paused"
     phaseTxt := WoodcutPhase = "banking" ? "Banking" : "Cutting"
@@ -368,6 +374,8 @@ StartWoodcut() {
     TreeClickNoWcCount := 0
     SetTimer(DoWoodcutStep, MainLoopInterval)
     SetTimer(UpdateInvSlotState, InvSlotCheckInterval)
+    if (RunDurationMinutes > 0)
+        UpdateStatusGui()
     ToolTip("Woodcutting bot: Running")
     SetTimer(() => ToolTip(), 2000)
 }
@@ -761,6 +769,7 @@ DoWoodcutStep() {
         BankSubStep := 0
         BankNav1FailCount := 0
         BankDepositBoxFailCount := 0
+        BankDepositClickCount := 0
         TreeClickNoWcCount := 0
     }
 
@@ -840,7 +849,8 @@ DoWoodcutStep() {
 
 DoBankingStep() {
     global IsRunning, WoodcutPhase, BankStep, BankSubStep, BankWaitUntil
-    global BankNav1FailCount, BankDepositBoxFailCount, MaxNav1Attempts, MaxDepositBoxAttempts
+    global BankNav1FailCount, BankDepositBoxFailCount, BankDepositClickCount
+    global MaxNav1Attempts, MaxDepositBoxAttempts, MaxDepositClickAttempts
     global Nav1Color, Nav1Variation, DepositBoxColor, DepositBoxVariation
     global WcStatusAction, WcDebugLine
 
@@ -953,6 +963,7 @@ DoBankingStep() {
     if (BankStep = 2) {
         if (IsDepositVisible()) {
             BankStep := 3
+            BankDepositClickCount := 0
             WcStatusAction := "Deposit box open — click deposit"
         } else if (A_TickCount >= BankWaitUntil) {
             BankStep := 1
@@ -964,28 +975,30 @@ DoBankingStep() {
         return
     }
 
-    ; Step 3: Click deposit color in deposit area
+    ; Step 3: Keep clicking deposit until color is gone (max 10 attempts)
     if (BankStep = 3) {
-        if (ClickDepositInArea()) {
-            BankStep := 4
-            WcStatusAction := "Clicked deposit — wait for done"
-        } else {
-            WcStatusAction := "Deposit button not found"
-        }
-        return
-    }
-
-    ; Step 4: Wait until deposit color no longer in area (box closed, done)
-    if (BankStep = 4) {
         if (!IsDepositVisible()) {
             WoodcutPhase := "cutting"
             BankStep := 0
             BankSubStep := 0
             BankNav1FailCount := 0
             BankDepositBoxFailCount := 0
+            BankDepositClickCount := 0
             WcStatusAction := "Banking done — back to cutting"
+            return
+        }
+        if (BankDepositClickCount >= MaxDepositClickAttempts) {
+            PauseWoodcut()
+            ToolTip("Deposit failed 10 times (color still visible). Paused.")
+            SetTimer(() => ToolTip(), 5000)
+            WcStatusAction := "PAUSED: Deposit not registering"
+            return
+        }
+        if (ClickDepositInArea()) {
+            BankDepositClickCount++
+            WcStatusAction := "Deposited (" BankDepositClickCount "/" MaxDepositClickAttempts ")"
         } else {
-            WcStatusAction := "Depositing..."
+            WcStatusAction := "Deposit button not found"
         }
     }
 }

@@ -40,6 +40,25 @@ global BoundsMaxDist := 50       ; max px from first pixel when finding edges (k
 global RunDurationMinutes := 0
 global RunStartTime := 0
 
+; Item pickup – search play area for color; if found, click every 1–2s (priority 1)
+global ItemPickupColor := ""
+global ItemPickupVariation := 15     ; color threshold 0–255 (a little tolerance for item name text)
+global ItemPickupIntervalMin := 1000
+global ItemPickupIntervalMax := 2000
+; Local two-point: second search only in a box around first hit so both points are from same item name (text)
+global ItemPickupNameBoxHalfW := 45   ; half-width of box around first pixel (~one item name width)
+global ItemPickupNameBoxHalfH := 14   ; half-height (~one line of text)
+
+; Inventory + bury bones – if bone color in inventory area, click to bury (priority 2, after pickup)
+global InventoryX1 := 0
+global InventoryY1 := 0
+global InventoryX2 := 0
+global InventoryY2 := 0
+global BoneColor := ""
+global BoneColorVariation := 10
+global BoneBuryIntervalMin := 800
+global BoneBuryIntervalMax := 1500
+
 CoordMode("Pixel", "Screen")
 CoordMode("Mouse", "Screen")
 
@@ -48,6 +67,8 @@ LoadConfig() {
     global TargetColor, ConfigPath
     global InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global ItemPickupColor, ItemPickupVariation
+    global InventoryX1, InventoryY1, InventoryX2, InventoryY2, BoneColor
     global RunDurationMinutes
     try {
         if FileExist(ConfigPath) {
@@ -65,6 +86,19 @@ LoadConfig() {
             PlayAreaY1 := Integer(IniRead(ConfigPath, "PlayArea", "Y1", "0"))
             PlayAreaX2 := Integer(IniRead(ConfigPath, "PlayArea", "X2", "0"))
             PlayAreaY2 := Integer(IniRead(ConfigPath, "PlayArea", "Y2", "0"))
+            ipc := IniRead(ConfigPath, "ItemPickup", "Color", "")
+            if (ipc != "")
+                ItemPickupColor := "0x" ipc
+            ipv := IniRead(ConfigPath, "ItemPickup", "Variation", "")
+            if (ipv != "")
+                ItemPickupVariation := Integer(ipv)
+            InventoryX1 := Integer(IniRead(ConfigPath, "Inventory", "X1", "0"))
+            InventoryY1 := Integer(IniRead(ConfigPath, "Inventory", "Y1", "0"))
+            InventoryX2 := Integer(IniRead(ConfigPath, "Inventory", "X2", "0"))
+            InventoryY2 := Integer(IniRead(ConfigPath, "Inventory", "Y2", "0"))
+            bc := IniRead(ConfigPath, "Bones", "Color", "")
+            if (bc != "")
+                BoneColor := "0x" bc
             RunDurationMinutes := Integer(IniRead(ConfigPath, "Settings", "RunDurationMinutes", "0"))
             if (RunDurationMinutes < 0)
                 RunDurationMinutes := 0
@@ -110,9 +144,16 @@ BuildStatusGui() {
     StatusGui["RunMinutes"].SetFont("cBlack")
     StatusGui.Add("Text", "x+6 yp+2", "0 = unlimited")
     StatusGui.Add("Text", "xs Section y+8", "Configuration:")
-    StatusGui.Add("Text", "vTargetRow xs y+2", "[—] Target color     Ctrl+Shift+C")
+    StatusGui.Add("Text", "vTargetSwatch xs y+2 w14 h14 Border Center", "■")
+    StatusGui.Add("Text", "vTargetRow x+2 yp", "[—] Target color     Ctrl+Shift+C")
     StatusGui.Add("Text", "vPlayAreaRow xs", "[—] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
-    StatusGui.Add("Text", "vInCombatRow xs", "[—] In-combat       Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+V (color)")
+    StatusGui.Add("Text", "vInCombatSwatch xs w14 h14 Border Center", "■")
+    StatusGui.Add("Text", "vInCombatRow x+2 yp", "[—] In-combat       Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+V (color)")
+    StatusGui.Add("Text", "vItemPickupSwatch xs w14 h14 Border Center", "■")
+    StatusGui.Add("Text", "vItemPickupRow x+2 yp", "[—] Item pickup (play area)  Ctrl+Shift+U (color)")
+    StatusGui.Add("Text", "vInventoryRow xs", "[—] Inventory area   Ctrl+Shift+I (TL)  Ctrl+Shift+O (BR)")
+    StatusGui.Add("Text", "vBonesSwatch xs w14 h14 Border Center", "■")
+    StatusGui.Add("Text", "vBonesRow x+2 yp", "[—] Bury bones (inventory)  Ctrl+Shift+Y (color)")
     StatusGui.Add("Text", "xs y+8", "Hotkeys:")
     StatusGui.Add("Text", "vHotkeysRow xs y+2", "Start Ctrl+Shift+Q  |  Pause Ctrl+Shift+W  |  Exit Ctrl+Shift+X")
     StatusGui.Show("x" (A_ScreenWidth - 520) " y10 NoActivate w500")
@@ -123,6 +164,8 @@ UpdateStatusGui() {
     global InCombat, FightStatusAction, FightDebugLine
     global TargetColor, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global InCombatAreaX1, InCombatAreaY1, InCombatAreaX2, InCombatAreaY2, InCombatColor
+    global ItemPickupColor
+    global InventoryX1, InventoryY1, InventoryX2, InventoryY2, BoneColor
     if !StatusGui
         return
     try {
@@ -155,9 +198,23 @@ UpdateStatusGui() {
     tSet := (TargetColor != "")
     pSet := (PlayAreaX2 > PlayAreaX1 && PlayAreaY2 > PlayAreaY1)
     iSet := (InCombatAreaX2 > InCombatAreaX1 && InCombatAreaY2 > InCombatAreaY1 && InCombatColor != "")
+    ipSet := (ItemPickupColor != "")
+    invSet := (InventoryX2 > InventoryX1 && InventoryY2 > InventoryY1)
+    boneSet := (BoneColor != "")
     SetGuiText(StatusGui["TargetRow"], "[" (tSet ? "✓" : "—") "] Target color     Ctrl+Shift+C")
     SetGuiText(StatusGui["PlayAreaRow"], "[" (pSet ? "✓" : "—") "] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
     SetGuiText(StatusGui["InCombatRow"], "[" (iSet ? "✓" : "—") "] In-combat       Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+V (color)")
+    SetGuiText(StatusGui["ItemPickupRow"], "[" (ipSet ? "✓" : "—") "] Item pickup (play area)  Ctrl+Shift+U (color)")
+    SetGuiText(StatusGui["InventoryRow"], "[" (invSet ? "✓" : "—") "] Inventory area   Ctrl+Shift+I (TL)  Ctrl+Shift+O (BR)")
+    SetGuiText(StatusGui["BonesRow"], "[" (boneSet ? "✓" : "—") "] Bury bones (inventory)  Ctrl+Shift+Y (color)")
+    ; Color swatches (little square = stored color); all stored as RGB
+    try {
+        StatusGui["TargetSwatch"].SetFont("c" . (TargetColor ? SubStr(TargetColor, 3) : "808080"))
+        StatusGui["InCombatSwatch"].SetFont("c" . (InCombatColor ? SubStr(InCombatColor, 3) : "808080"))
+        StatusGui["ItemPickupSwatch"].SetFont("c" . (ItemPickupColor ? SubStr(ItemPickupColor, 3) : "808080"))
+        StatusGui["BonesSwatch"].SetFont("c" . (BoneColor ? SubStr(BoneColor, 3) : "808080"))
+    } catch {
+    }
 }
 
 ; Build and show status window; refresh every 500 ms
@@ -176,10 +233,15 @@ SetTimer(UpdateStatusGui, 500)
 ^+v:: SetInCombatColor()             ; set in-combat color (color in area = in combat)
 ^+b:: SetPlayAreaTopLeft()           ; set play area top-left corner
 ^+n:: SetPlayAreaBottomRight()      ; set play area bottom-right corner
+^+u:: SetItemPickupColor()          ; set item pickup color (search play area, click every 1–2s until gone)
+^+i:: SetInventoryTopLeft()        ; set inventory area top-left
+^+o:: SetInventoryBottomRight()     ; set inventory area bottom-right
+^+y:: SetBoneColor()               ; set bone color (click in inventory to bury)
 
 ; --- Start ---
 StartClicker() {
     global TargetColor, IsRunning, RunDurationMinutes, RunStartTime, StatusGui, ConfigPath
+    global ItemPickupIntervalMin, ItemPickupIntervalMax
     if (TargetColor = "") {
         MsgBox("No highlight color set. Move cursor over the monster highlight and press Ctrl+Shift+C.", "ClickColor", "Icon!")
         return
@@ -198,6 +260,8 @@ StartClicker() {
     IsRunning := true
     SetTimer(UpdateInCombatState, CombatCheckInterval)
     SetTimer(TryAttackWhenOutOfCombat, AttackInterval)
+    SetTimer(TryItemPickup, Random(ItemPickupIntervalMin, ItemPickupIntervalMax))
+    SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
     ToolTip("Auto fighter: Running" (RunDurationMinutes > 0 ? " (" RunDurationMinutes " min)" : ""))
     SetTimer(() => ToolTip(), 2000)
 }
@@ -219,6 +283,8 @@ ExitClicker() {
     IsRunning := false
     SetTimer(UpdateInCombatState, 0)
     SetTimer(TryAttackWhenOutOfCombat, 0)
+    SetTimer(TryItemPickup, 0)
+    SetTimer(TryBuryBones, 0)
     ToolTip()
     ExitApp()
 }
@@ -275,6 +341,62 @@ SetInCombatColor() {
     catch {
     }
     ToolTip("In-combat color set at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+; --- Item pickup: search play area for color; if found, click it every 1–2s until gone ---
+SetItemPickupColor() {
+    global ItemPickupColor, ItemPickupVariation, ConfigPath
+    MouseGetPos(&mx, &my)
+    ItemPickupColor := PixelGetColor(mx, my, "RGB")
+    try {
+        IniWrite(SubStr(ItemPickupColor, 3), ConfigPath, "ItemPickup", "Color")
+        IniWrite(String(ItemPickupVariation), ConfigPath, "ItemPickup", "Variation")
+    } catch {
+    }
+    ToolTip("Item pickup color set at " mx "," my " (variation=" ItemPickupVariation ")")
+    SetTimer(() => ToolTip(), 2000)
+}
+
+; --- Inventory area (where to look for bone color to bury) ---
+SetInventoryTopLeft() {
+    global InventoryX1, InventoryY1, ConfigPath
+    MouseGetPos(&mx, &my)
+    InventoryX1 := mx
+    InventoryY1 := my
+    try {
+        IniWrite(String(mx), ConfigPath, "Inventory", "X1")
+        IniWrite(String(my), ConfigPath, "Inventory", "Y1")
+    } catch {
+    }
+    ToolTip("Inventory TOP-LEFT set at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SetInventoryBottomRight() {
+    global InventoryX2, InventoryY2, ConfigPath
+    MouseGetPos(&mx, &my)
+    InventoryX2 := mx
+    InventoryY2 := my
+    try {
+        IniWrite(String(mx), ConfigPath, "Inventory", "X2")
+        IniWrite(String(my), ConfigPath, "Inventory", "Y2")
+    } catch {
+    }
+    ToolTip("Inventory BOTTOM-RIGHT set at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+; --- Bone color (click in inventory to bury; priority after item pickup) ---
+SetBoneColor() {
+    global BoneColor, ConfigPath
+    MouseGetPos(&mx, &my)
+    BoneColor := PixelGetColor(mx, my, "RGB")
+    try
+        IniWrite(SubStr(BoneColor, 3), ConfigPath, "Bones", "Color")
+    catch {
+    }
+    ToolTip("Bone color set at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
 }
 
@@ -397,9 +519,131 @@ UpdateInCombatState() {
     FightDebugLine := "InCombat=" (InCombat ? "1" : "0") " LastSeen=" (A_TickCount - LastInCombatSeen) "ms"
 }
 
+; --- Item pickup: color is on the item NAME (text, not tile). Local two-point = both hits from same name, midpoint = center ---
+TryItemPickup() {
+    global IsRunning, ItemPickupColor, ItemPickupVariation
+    global ItemPickupIntervalMin, ItemPickupIntervalMax
+    global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global ClickJitter, ClickDelayMs
+    global ItemPickupNameBoxHalfW, ItemPickupNameBoxHalfH
+    if (!IsRunning)
+        return
+    if (ItemPickupColor = "") {
+        SetTimer(TryItemPickup, Random(ItemPickupIntervalMin, ItemPickupIntervalMax))
+        return
+    }
+    paX1 := PlayAreaX1
+    paY1 := PlayAreaY1
+    paX2 := PlayAreaX2
+    paY2 := PlayAreaY2
+    if (paX2 <= paX1 || paY2 <= paY1) {
+        paX1 := 0
+        paY1 := 0
+        paX2 := A_ScreenWidth
+        paY2 := A_ScreenHeight
+    }
+    foundX := 0
+    foundY := 0
+    try {
+        ; 1) First hit: any pixel of the item name (play area, TL→BR)
+        if (!PixelSearch(&foundX, &foundY, paX1, paY1, paX2, paY2, Integer(ItemPickupColor), ItemPickupVariation)) {
+            SetTimer(TryItemPickup, Random(ItemPickupIntervalMin, ItemPickupIntervalMax))
+            return
+        }
+        ; 2) Local box around first hit – only as big as one item name (text), clamped to play area
+        lx1 := Max(paX1, foundX - ItemPickupNameBoxHalfW)
+        ly1 := Max(paY1, foundY - ItemPickupNameBoxHalfH)
+        lx2 := Min(paX2, foundX + ItemPickupNameBoxHalfW)
+        ly2 := Min(paY2, foundY + ItemPickupNameBoxHalfH)
+        ; 3) Second hit: opposite corner of LOCAL box only → other end of same item name (same text blob)
+        otherX := 0
+        otherY := 0
+        if (!PixelSearch(&otherX, &otherY, lx2, ly2, lx1, ly1, Integer(ItemPickupColor), ItemPickupVariation)) {
+            otherX := foundX
+            otherY := foundY
+        }
+        clickX := (foundX + otherX) // 2
+        clickY := (foundY + otherY) // 2
+        if (ClickJitter > 0) {
+            clickX += Random(-ClickJitter, ClickJitter)
+            clickY += Random(-ClickJitter, ClickJitter)
+            clickX := Max(paX1, Min(paX2, clickX))
+            clickY := Max(paY1, Min(paY2, clickY))
+        }
+        MouseMove(clickX, clickY)
+        if (ClickDelayMs > 0)
+            Sleep(ClickDelayMs)
+        Click()
+    } catch {
+    }
+    SetTimer(TryItemPickup, Random(ItemPickupIntervalMin, ItemPickupIntervalMax))
+}
+
+; --- Bury bones: if bone color in inventory area, click it (priority 2; only when no items to pickup) ---
+TryBuryBones() {
+    global IsRunning, BoneColor, BoneColorVariation
+    global ItemPickupColor, ItemPickupVariation, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global InventoryX1, InventoryY1, InventoryX2, InventoryY2
+    global ClickJitter, ClickDelayMs
+    global BoneBuryIntervalMin, BoneBuryIntervalMax
+    if (!IsRunning)
+        return
+    if (BoneColor = "") {
+        SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
+        return
+    }
+    paX1 := PlayAreaX1
+    paY1 := PlayAreaY1
+    paX2 := PlayAreaX2
+    paY2 := PlayAreaY2
+    if (paX2 <= paX1 || paY2 <= paY1) {
+        paX1 := 0
+        paY1 := 0
+        paX2 := A_ScreenWidth
+        paY2 := A_ScreenHeight
+    }
+    if (ItemPickupColor != "" && ColorInArea(paX1, paY1, paX2, paY2, ItemPickupColor, ItemPickupVariation)) {
+        SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
+        return
+    }
+    invX1 := InventoryX1
+    invY1 := InventoryY1
+    invX2 := InventoryX2
+    invY2 := InventoryY2
+    if (invX2 <= invX1 || invY2 <= invY1) {
+        SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
+        return
+    }
+    ; Click the pixel that matches bone color (no midpoint – item pickup keeps that for ground tiles)
+    foundX := 0
+    foundY := 0
+    try {
+        if (!PixelSearch(&foundX, &foundY, invX1, invY1, invX2, invY2, Integer(BoneColor), BoneColorVariation)) {
+            SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
+            return
+        }
+        clickX := foundX
+        clickY := foundY
+        if (ClickJitter > 0) {
+            clickX += Random(-ClickJitter, ClickJitter)
+            clickY += Random(-ClickJitter, ClickJitter)
+            clickX := Max(invX1, Min(invX2, clickX))
+            clickY := Max(invY1, Min(invY2, clickY))
+        }
+        MouseMove(clickX, clickY)
+        if (ClickDelayMs > 0)
+            Sleep(ClickDelayMs)
+        Click()
+    } catch {
+    }
+    SetTimer(TryBuryBones, Random(BoneBuryIntervalMin, BoneBuryIntervalMax))
+}
+
 ; --- When out of combat: find color and click (only inside play area, kept fast) ---
 TryAttackWhenOutOfCombat() {
     global InCombat, TargetColor, ColorVariation, FightStatusAction
+    global ItemPickupColor, ItemPickupVariation
+    global InventoryX1, InventoryY1, InventoryX2, InventoryY2, BoneColor, BoneColorVariation
     global RadiusStep, ClickJitter, ClickDelayMs, BoundsScanStep, BoundsMaxDist
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     if InCombat || (TargetColor = "")
@@ -414,6 +658,11 @@ TryAttackWhenOutOfCombat() {
         paX2 := A_ScreenWidth
         paY2 := A_ScreenHeight
     }
+    ; Don't attack while item pickup color still visible (priority 1) or bones in inventory (priority 2)
+    if (ItemPickupColor != "" && ColorInArea(paX1, paY1, paX2, paY2, ItemPickupColor, ItemPickupVariation))
+        return
+    if (BoneColor != "" && InventoryX2 > InventoryX1 && InventoryY2 > InventoryY1 && ColorInArea(InventoryX1, InventoryY1, InventoryX2, InventoryY2, BoneColor, BoneColorVariation))
+        return
     cx := (paX1 + paX2) // 2
     cy := (paY1 + paY2) // 2
     ; Find first matching pixel from center outward
