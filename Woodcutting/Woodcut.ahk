@@ -75,6 +75,7 @@ global MainLoopInterval := 350
 global CuttingNav1WaitUntil := 0   ; when we clicked nav1 (no tree), wait before next action
 global TreeClickWaitUntil := 0     ; cooldown after clicking a tree (3-5 seconds)
 global CuttingNav1Clicked := false ; true after clicking nav1 (waiting for trees), reset when we click a tree
+global TreeClickNoWcCount := 0    ; tree clicks without woodcutting status; pause if reaches 10
 global ClickJitter := 1
 global ClickDelayMs := 50
 global RadiusStep := 80
@@ -364,6 +365,7 @@ StartWoodcut() {
     BankSubStep := 0
     BankNav1FailCount := 0
     BankDepositBoxFailCount := 0
+    TreeClickNoWcCount := 0
     SetTimer(DoWoodcutStep, MainLoopInterval)
     SetTimer(UpdateInvSlotState, InvSlotCheckInterval)
     ToolTip("Woodcutting bot: Running")
@@ -744,7 +746,7 @@ ClickDepositInArea() {
 DoWoodcutStep() {
     global IsRunning, WoodcutPhase, BankStep, BankWaitUntil
     global BankNav1FailCount, BankDepositBoxFailCount, BankSubStep
-    global IsInventoryFull, CuttingNav1WaitUntil, TreeClickWaitUntil, CuttingNav1Clicked
+    global IsInventoryFull, CuttingNav1WaitUntil, TreeClickWaitUntil, CuttingNav1Clicked, TreeClickNoWcCount
     global TreeColor, TreeColorVariation, Nav1Color, Nav1Variation
     global DepositBoxColor, DepositBoxVariation
     global WcStatusAction, WcDebugLine
@@ -759,6 +761,7 @@ DoWoodcutStep() {
         BankSubStep := 0
         BankNav1FailCount := 0
         BankDepositBoxFailCount := 0
+        TreeClickNoWcCount := 0
     }
 
     if (WoodcutPhase = "banking") {
@@ -780,14 +783,27 @@ DoWoodcutStep() {
     treeVisible := ColorInArea(pa.x1, pa.y1, pa.x2, pa.y2, TreeColor, TreeColorVariation)
     isWcing := IsWoodcutting()
 
+    ; Reset failsafe counter when woodcutting status appears
+    if (isWcing)
+        TreeClickNoWcCount := 0
+
     ; If tree visible and NOT woodcutting -> click tree (respect cooldown)
     if (treeVisible && !isWcing) {
         if (A_TickCount < TreeClickWaitUntil) {
             WcStatusAction := "Waiting after tree click..."
             return
         }
+        ; Failsafe: 10 tree clicks with no woodcutting status = pause
+        if (TreeClickNoWcCount >= 10) {
+            PauseWoodcut()
+            ToolTip("Tree clicks failed 10 times (woodcutting never started). Paused.")
+            SetTimer(() => ToolTip(), 5000)
+            WcStatusAction := "PAUSED: Tree clicks not registering"
+            return
+        }
         if (FindAndClickColor(TreeColor, TreeColorVariation, true)) {
-            WcStatusAction := "Clicked tree"
+            TreeClickNoWcCount++
+            WcStatusAction := "Clicked tree (" TreeClickNoWcCount "/10)"
             TreeClickWaitUntil := A_TickCount + Random(3000, 5000)
             CuttingNav1Clicked := false  ; reset so we can click nav1 again if trees disappear
         } else {
