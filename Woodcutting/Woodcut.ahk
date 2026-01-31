@@ -71,6 +71,7 @@ global MaxNav1Attempts := 5
 global MaxDepositBoxAttempts := 5
 global MaxDepositClickAttempts := 10
 global BankDepositClickCount := 0
+global BankDepositClickWaitUntil := 0
 
 ; Main loop interval (faster = snappier when moving)
 global MainLoopInterval := 350
@@ -849,7 +850,7 @@ DoWoodcutStep() {
 
 DoBankingStep() {
     global IsRunning, WoodcutPhase, BankStep, BankSubStep, BankWaitUntil
-    global BankNav1FailCount, BankDepositBoxFailCount, BankDepositClickCount
+    global BankNav1FailCount, BankDepositBoxFailCount, BankDepositClickCount, BankDepositClickWaitUntil
     global MaxNav1Attempts, MaxDepositBoxAttempts, MaxDepositClickAttempts
     global Nav1Color, Nav1Variation, DepositBoxColor, DepositBoxVariation
     global WcStatusAction, WcDebugLine
@@ -975,7 +976,7 @@ DoBankingStep() {
         return
     }
 
-    ; Step 3: Keep clicking deposit until color is gone (max 10 attempts)
+    ; Step 3: Keep clicking deposit until color is gone (max 10 attempts, 2-3s between clicks)
     if (BankStep = 3) {
         if (!IsDepositVisible()) {
             WoodcutPhase := "cutting"
@@ -994,8 +995,13 @@ DoBankingStep() {
             WcStatusAction := "PAUSED: Deposit not registering"
             return
         }
+        if (A_TickCount < BankDepositClickWaitUntil) {
+            WcStatusAction := "Depositing... wait"
+            return
+        }
         if (ClickDepositInArea()) {
             BankDepositClickCount++
+            BankDepositClickWaitUntil := A_TickCount + Random(2000, 3000)
             WcStatusAction := "Deposited (" BankDepositClickCount "/" MaxDepositClickAttempts ")"
         } else {
             WcStatusAction := "Deposit button not found"
