@@ -1,7 +1,10 @@
 #Requires AutoHotkey v2.0
 
 ; --- State ---
-global FishingSpotColor := ""       ; 0xRRGGBB, fishing spot highlight color to click
+global FishingSpotColor := ""       ; 0xRRGGBB, primary color (find first)
+global FishingSpotSecondaryColor := "" ; optional: must be near primary; we click secondary's center
+global FishSpotSecondaryVariation := 1 ; almost no tolerance for secondary (strict match)
+global FishSpotSecondaryNearPx := 55   ; max pixels primary->secondary to consider "close"
 global IsRunning := false
 global ColorVariation := 20         ; color tolerance for fishing spot (0–255)
 global ConfigPath := A_ScriptDir "\Fish.ini"
@@ -32,26 +35,28 @@ global InvSlotY1 := 0
 global InvSlotX2 := 0
 global InvSlotY2 := 0
 global InvSlotEmptyColor := ""   ; color when slot is empty (auto-captured when inv slot area is set)
-global InvSlotVariation := 15    ; tolerance when comparing to empty
+global InvSlotVariation := 20    ; tolerance when comparing to empty
 global IsInventoryFull := false  ; true when slot doesn't match empty; persists until slot matches empty again
 global InvSlotCheckInterval := 2000 ; ms between inv slot checks
 global InvSlotOverlayGuis := []
 global InvSlotCornerSize := 8
 
 ; Targeting (fishing spot click)
-global FishInterval := 1000        ; ms between fishing attempts when not fishing (fast now that we use green indicator)
+global FishInterval := 600         ; ms between fishing/nav attempts (faster = more responsive)
 global LastFishClickTime := 0      ; tick when we last clicked a fishing spot
+global FishSpotFailCount := 0      ; consecutive failures to find spot; after 3, try nav1 to reposition
+global FishNav1WaitUntil := 0      ; after clicking nav1 to find spots, wait before searching again
 global LastFishClickCooldownMs := 0 ; ms to wait after that click (random 5–10 s when we clicked)
 global FishClickCooldownMin := 5000 ; ms min wait after fish click
 global FishClickCooldownMax := 10000 ; ms max wait after fish click (random between min–max)
-global RadiusStep := 120
+global RadiusStep := 150           ; larger = fewer rings = faster scan
 global ClickJitter := 2
 global ClickDelayMs := 35
-global BoundsScanStep := 2
+global BoundsScanStep := 3         ; step when finding edges (3 = faster than 2)
 global BoundsMaxDist := 50
 ; Fishing spot / nav: use centroid of matching pixels in a tile-sized window (click tile center, not border)
 global FishSpotCentroidRadius := 28 ; half-width of search window around first hit (~56px tile)
-global FishSpotCentroidStep := 4   ; sample every N pixels for centroid (4 = fast, 2 = more accurate)
+global FishSpotCentroidStep := 6   ; sample every N pixels for centroid (6 = faster, 4 = balanced)
 
 ; Run duration (0 = unlimited)
 global RunDurationMinutes := 0
@@ -59,27 +64,28 @@ global RunStartTime := 0
 
 ; Banking mode – nav1 -> wait 3–5 s -> nav2 -> wait 3–5 s -> deposit box -> wait 5–7 s -> done
 ; Nav tiles and deposit box are color-only (no coordinates); we search for the color on screen each time so moving tiles work
+global NavPointCount := 4       ; 0=none, 1-4 nav tiles
 global NavTile1Color := ""       ; 0xRRGGBB, set with Ctrl+Shift+1
-global NavTile2Color := ""       ; 0xRRGGBB, set with Ctrl+Shift+2
+global NavTile2Color := ""
+global NavTile3Color := ""
+global NavTile4Color := ""
 global DepositBoxColor := ""     ; 0xRRGGBB, set with Ctrl+Shift+D
-global BankingStep := 0          ; 0=idle, 1=nav1, 2=wait, 3=nav2, 4=wait, 5=deposit box, 55=wait open+click deposit, 6=wait closed, 7=nav2 return, 8=wait, 9=nav1 return, 10=wait
+global BankingStep := 0          ; 0=idle, 1=to bank (nav 4→1 or deposit), 5=deposit (no nav), 55=wait open, 6=wait closed, 7=return (nav 1→4 or fishing spot; search 1 first so we don't re-click 4)
 global BankWaitUntil := 0        ; tick when current wait ends
+global BankLastNavClickAt := 0   ; tick of last nav/deposit click (for min delay; next target can be clicked sooner if visible)
 global BankRecaptureEmptyAt := 0 ; tick when to re-capture empty baseline after deposit (0 = not pending)
 global BankDepositAreaLastClickAt := 0 ; tick of last deposit-area click (for retry cooldown in step 6)
-global BankNavWaitMin := 2000    ; ms to wait between nav1 and nav2 going to bank (2–3 s)
-global BankNavWaitMax := 3000
+global BankNavWaitMin := 7000    ; ms between nav clicks (7–10 s)
+global BankNavWaitMax := 10000
 global BankDepositBoxOpenWaitMin := 7000 ; ms to wait for deposit box to open after clicking it (7–9 s)
 global BankDepositBoxOpenWaitMax := 9000
 global BankDepositWaitMin := 5000 ; ms to wait after clicking deposit-all (5–7 s before return)
 global BankDepositWaitMax := 7000
 global BankDepositClosedTimeout := 8000 ; max ms to wait for deposit area color to disappear (box closed)
 global BankDepositAreaClickCooldownMs := 2500 ; min ms between deposit-area clicks (retry if color persists = other fish types)
-global BankReturnNav2WaitMin := 7000 ; ms after clicking nav 2 on return (7–9 s)
-global BankReturnNav2WaitMax := 9000
-global BankReturnNav1WaitMin := 2000 ; ms after clicking nav 1 on return (2–3 s)
-global BankReturnNav1WaitMax := 3000
 global BankingColorVariation := 5  ; deposit box: exact or super close (per-channel tolerance 0–255)
-global BankingNavColorVariation := 5 ; nav tiles: exact or super close (reduce false positives)
+global BankingNavColorVariation := 2 ; nav tiles: strict match (reduce false clicks)
+global BankNavClickMinMs := 1500   ; min ms between nav/deposit clicks (prevents double-click; next target can be clicked sooner if visible)
 global BankingImageOffset := 15   ; when using image search: click this many px from top-left of found image
 
 ; Deposit box open detection: area + color; when color found in area, deposit box is open
@@ -100,16 +106,19 @@ global PowerfishClickDelayMin := 100 ; ms between each shift+click (0.1–0.4 s)
 global PowerfishClickDelayMax := 400
 global PowerfishJitter := 3          ; pixels variation per click
 
+global FishStatusAction := ""        ; current action for status display
+global FishDebugLine := ""           ; debug info for GUI
+
 CoordMode("Pixel", "Screen")
 CoordMode("Mouse", "Screen")
 
 ; --- Load config ---
 LoadConfig() {
-    global FishingSpotColor, ConfigPath
+    global FishingSpotColor, FishingSpotSecondaryColor, ConfigPath
     global FishingRegionX1, FishingRegionY1, FishingRegionX2, FishingRegionY2, FishingIndicatorColor
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global InvSlotX1, InvSlotY1, InvSlotX2, InvSlotY2, InvSlotEmptyColor
-    global NavTile1Color, NavTile2Color, DepositBoxColor
+    global NavTile1Color, NavTile2Color, NavTile3Color, NavTile4Color, DepositBoxColor
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
     global FishingMode, PowerfishSlots, RunDurationMinutes
     try {
@@ -117,6 +126,9 @@ LoadConfig() {
             c := IniRead(ConfigPath, "Settings", "FishingSpotColor", "")
             if (c != "")
                 FishingSpotColor := "0x" c
+            sc := IniRead(ConfigPath, "Settings", "FishingSpotSecondaryColor", "")
+            if (sc != "")
+                FishingSpotSecondaryColor := "0x" sc
             FishingRegionX1 := Integer(IniRead(ConfigPath, "FishingRegion", "X1", "0"))
             FishingRegionY1 := Integer(IniRead(ConfigPath, "FishingRegion", "Y1", "0"))
             FishingRegionX2 := Integer(IniRead(ConfigPath, "FishingRegion", "X2", "0"))
@@ -135,12 +147,21 @@ LoadConfig() {
             ec := IniRead(ConfigPath, "InvSlot", "EmptyColor", "")
             if (ec != "")
                 InvSlotEmptyColor := "0x" ec
+            NavPointCount := Integer(IniRead(ConfigPath, "Banking", "NavPointCount", "4"))
+            if (NavPointCount < 0 || NavPointCount > 4)
+                NavPointCount := 4
             n1 := IniRead(ConfigPath, "Banking", "NavTile1Color", "")
             if (n1 != "")
                 NavTile1Color := "0x" n1
             n2 := IniRead(ConfigPath, "Banking", "NavTile2Color", "")
             if (n2 != "")
                 NavTile2Color := "0x" n2
+            n3 := IniRead(ConfigPath, "Banking", "NavTile3Color", "")
+            if (n3 != "")
+                NavTile3Color := "0x" n3
+            n4 := IniRead(ConfigPath, "Banking", "NavTile4Color", "")
+            if (n4 != "")
+                NavTile4Color := "0x" n4
             db := IniRead(ConfigPath, "Banking", "DepositBoxColor", "")
             if (db != "")
                 DepositBoxColor := "0x" db
@@ -191,7 +212,7 @@ SetGuiText(ctrl, str) {
 }
 
 BuildStatusGui() {
-    global StatusGui, RunDurationMinutes, FishingMode
+    global StatusGui, RunDurationMinutes, FishingMode, NavPointCount
     StatusGui := Gui("+AlwaysOnTop -MaximizeBox -MinimizeBox +ToolWindow")
     StatusGui.BackColor := "1e1e1e"
     StatusGui.SetFont("s9 cD0D0D0", "Segoe UI")
@@ -199,6 +220,10 @@ BuildStatusGui() {
     StatusGui.MarginY := 6
     StatusGui.Add("Text", "Section", "Fishing Bot")
     StatusGui.Add("Text", "vStatusText xs", "Paused  |  Not fishing  |  Inv: --")
+    StatusGui.Add("Edit", "vActionText xs ReadOnly r1 w400 Background1e1e1e", "Action: —")
+    StatusGui["ActionText"].SetFont("cA0D0A0")
+    StatusGui.Add("Edit", "vDebugText xs ReadOnly r1 w400 Background1e1e1e", "Debug: —")
+    StatusGui["DebugText"].SetFont("c808080")
     StatusGui.Add("Text", "vTimerText xs", "Time left: --")
     StatusGui.Add("Text", "xs Section", "Run (min):")
     StatusGui.Add("Edit", "vRunMinutes x+6 yp-2 w44", String(RunDurationMinutes))
@@ -209,28 +234,36 @@ BuildStatusGui() {
     StatusGui.Add("DDL", "vModeChoose x+6 yp-2 w90 Choose" modeChoice, ["Banking", "Powerfishing"])
     StatusGui["ModeChoose"].SetFont("cBlack")
     StatusGui.Add("Text", "xs Section y+8", "Configuration (set when game is ready):")
-    StatusGui.Add("Text", "vSpotRow xs y+2", "[—] Fishing spot     Ctrl+Shift+C")
+    StatusGui.Add("Text", "vSpotRow xs y+2", "[—] Spot primary     Ctrl+Shift+C")
+    StatusGui.Add("Text", "vSpotSecondaryRow xs", "[—] Spot secondary  Ctrl+Shift+G  (must be near primary; we click this)")
     StatusGui.Add("Text", "vPlayRow xs", "[—] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
     StatusGui.Add("Text", "vFishingRow xs", "[—] Fishing state   Ctrl+Shift+Y (TL)  Ctrl+Shift+U (BR)  Ctrl+Shift+V (fishing color)")
     StatusGui.Add("Text", "vInvSlotRow xs", "[—] Inv slot         Ctrl+Shift+I (TL)  Ctrl+Shift+O (BR)")
-    StatusGui.Add("Text", "vNav1Row xs", "[—] Nav tile 1       Ctrl+Shift+1")
-    StatusGui.Add("Text", "vNav2Row xs", "[—] Nav tile 2       Ctrl+Shift+2")
+    StatusGui.Add("Text", "xs Section", "Nav points:")
+    navChoose := Min(5, Max(1, NavPointCount + 1))
+    StatusGui.Add("DDL", "vNavPointCountChoose x+6 yp-2 w60 Choose" navChoose, ["0", "1", "2", "3", "4"])
+    StatusGui["NavPointCountChoose"].SetFont("cBlack")
+    StatusGui.Add("Text", "vNav1Row xs y+4", "[—] Nav 1     Ctrl+Shift+1")
+    StatusGui.Add("Text", "vNav2Row xs", "[—] Nav 2     Ctrl+Shift+2")
+    StatusGui.Add("Text", "vNav3Row xs", "[—] Nav 3     Ctrl+Shift+3")
+    StatusGui.Add("Text", "vNav4Row xs", "[—] Nav 4     Ctrl+Shift+4")
     StatusGui.Add("Text", "vDepositRow xs", "[—] Deposit box      Ctrl+Shift+D")
     StatusGui.Add("Text", "vDepositOpenRow xs", "[—] Deposit open    Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+F (color)")
     StatusGui.Add("Text", "vPowerfishRow xs", "[—] Powerfish slots  Ctrl+Shift+A add  Ctrl+Shift+Z clear")
     StatusGui.Add("Text", "xs y+8", "Hotkeys:")
     StatusGui.Add("Text", "vHotkeysRow xs y+2", "Start Ctrl+Shift+Q  |  Pause Ctrl+Shift+W  |  Exit Ctrl+Shift+X")
-    x := A_ScreenWidth - 420
+    x := A_ScreenWidth - 440
     y := 10
-    StatusGui.Show("x" x " y" y " NoActivate w400")
+    StatusGui.Show("x" x " y" y " NoActivate w420")
 }
 
 UpdateStatusGui() {
     global StatusGui, IsRunning, IsFishing, IsInventoryFull, BankingStep, RunDurationMinutes, RunStartTime, ConfigPath
-    global FishingSpotColor, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
+    global FishStatusAction, FishDebugLine
+    global FishingSpotColor, FishingSpotSecondaryColor, PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global FishingRegionX1, FishingRegionY1, FishingRegionX2, FishingRegionY2
     global InvSlotX1, InvSlotY1, InvSlotX2, InvSlotY2, InvSlotEmptyColor
-    global NavTile1Color, NavTile2Color, DepositBoxColor
+    global NavPointCount, NavTile1Color, NavTile2Color, DepositBoxColor
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
     global FishingMode, PowerfishSlots, BankingStep, ConfigPath
     if !StatusGui
@@ -251,6 +284,13 @@ UpdateStatusGui() {
         try
             IniWrite(FishingMode, ConfigPath, "Settings", "FishingMode")
         catch
+            {}
+        ; Sync nav point count from dropdown (DDL Value 1="0" ... 5="4")
+        try {
+            navVal := Integer(StatusGui["NavPointCountChoose"].Value)
+            NavPointCount := navVal >= 1 && navVal <= 5 ? navVal - 1 : 4
+            IniWrite(String(NavPointCount), ConfigPath, "Banking", "NavPointCount")
+        } catch
             {}
     } catch
         {}
@@ -295,6 +335,10 @@ UpdateStatusGui() {
         fishText := IsFishing ? "Fishing" : "Not fishing"
     invText := (InvSlotX2 > InvSlotX1 && InvSlotY2 > InvSlotY1) ? (IsInventoryFull ? "Inv: Full" : "Inv: OK") : "Inv: --"
     SetGuiText(StatusGui["StatusText"], runText "  |  " fishText "  |  " invText)
+    actionTxt := FishStatusAction != "" ? FishStatusAction : (IsRunning ? "Idle" : "Paused")
+    debugTxt := FishDebugLine != "" ? FishDebugLine : ("BankStep=" BankingStep " Fishing=" (IsFishing ? "Y" : "N"))
+    StatusGui["ActionText"].Value := "Action: " actionTxt
+    StatusGui["DebugText"].Value := "Debug: " debugTxt
     paX1 := 0
     paY1 := 0
     paX2 := 0
@@ -310,26 +354,34 @@ UpdateStatusGui() {
     }
     playSet := (paX2 > paX1 && paY2 > paY1)
     spotSet := (FishingSpotColor != "")
+    spotSecondarySet := (FishingSpotSecondaryColor != "")
     fishSet := (FishingRegionX2 > FishingRegionX1 && FishingRegionY2 > FishingRegionY1)
     invSet := (InvSlotX2 > InvSlotX1 && InvSlotY2 > InvSlotY1 && InvSlotEmptyColor != "")
     nav1Set := (NavTile1Color != "")
     nav2Set := (NavTile2Color != "")
+    nav3Set := (NavTile3Color != "")
+    nav4Set := (NavTile4Color != "")
     depositSet := (DepositBoxColor != "")
     depositOpenSet := (DepositBoxOpenX2 > DepositBoxOpenX1 && DepositBoxOpenY2 > DepositBoxOpenY1 && DepositBoxOpenColor != "")
     st := spotSet ? "✓" : "—"
+    st2 := spotSecondarySet ? "✓" : "—"
     pt := playSet ? "✓" : "—"
     ft := fishSet ? "✓" : "—"
     it := invSet ? "✓" : "—"
     n1 := nav1Set ? "✓" : "—"
     n2 := nav2Set ? "✓" : "—"
+    n3 := nav3Set ? "✓" : "—"
+    n4 := nav4Set ? "✓" : "—"
     dt := depositSet ? "✓" : "—"
     dto := depositOpenSet ? "✓" : "—"
     SetGuiText(StatusGui["SpotRow"], "[" st "] Fishing spot     Ctrl+Shift+C")
     SetGuiText(StatusGui["PlayRow"], "[" pt "] Play area        Ctrl+Shift+B (TL)  Ctrl+Shift+N (BR)")
     SetGuiText(StatusGui["FishingRow"], "[" ft "] Fishing state   Ctrl+Shift+Y (TL)  Ctrl+Shift+U (BR)  Ctrl+Shift+V (fishing color)")
     SetGuiText(StatusGui["InvSlotRow"], "[" it "] Inv slot         Ctrl+Shift+I (TL)  Ctrl+Shift+O (BR)")
-    SetGuiText(StatusGui["Nav1Row"], "[" n1 "] Nav tile 1       Ctrl+Shift+1")
-    SetGuiText(StatusGui["Nav2Row"], "[" n2 "] Nav tile 2       Ctrl+Shift+2")
+    SetGuiText(StatusGui["Nav1Row"], "[" n1 "] Nav 1     Ctrl+Shift+1")
+    SetGuiText(StatusGui["Nav2Row"], "[" n2 "] Nav 2     Ctrl+Shift+2")
+    SetGuiText(StatusGui["Nav3Row"], "[" n3 "] Nav 3     Ctrl+Shift+3")
+    SetGuiText(StatusGui["Nav4Row"], "[" n4 "] Nav 4     Ctrl+Shift+4")
     SetGuiText(StatusGui["DepositRow"], "[" dt "] Deposit box      Ctrl+Shift+D")
     SetGuiText(StatusGui["DepositOpenRow"], "[" dto "] Deposit open    Ctrl+Shift+E (TL)  Ctrl+Shift+R (BR)  Ctrl+Shift+F (color)")
     pfCount := PowerfishSlots.Length
@@ -401,7 +453,8 @@ BuildInvSlotOverlay() {
 ^+q:: StartFishing()
 ^+w:: PauseFishing()
 ^+x:: ExitFishing()
-^+c:: SetFishingSpotColor()         ; set fishing spot highlight color at cursor
+^+c:: SetFishingSpotColor()         ; set fishing spot primary color at cursor
+^+g:: SetFishingSpotSecondaryColor() ; set secondary (must be near primary; we click this)
 ^+y:: SetFishingRegionTopLeft()     ; set fishing state area top-left
 ^+u:: SetFishingRegionBottomRight() ; set fishing state area bottom-right
 ^+v:: SetFishingIndicatorColor()    ; set "fishing" color at cursor (green in area = fishing)
@@ -409,8 +462,10 @@ BuildInvSlotOverlay() {
 ^+n:: SetPlayAreaBottomRight()
 ^+i:: SetInvSlotTopLeft()           ; set last inventory slot top-left
 ^+o:: SetInvSlotBottomRight()       ; set last inventory slot bottom-right
-^+1:: SetNavTile1Color()            ; set first navigation tile color (walk to bank)
-^+2:: SetNavTile2Color()            ; set second navigation tile color
+^+1:: SetNavTile1Color()
+^+2:: SetNavTile2Color()
+^+3:: SetNavTile3Color()
+^+4:: SetNavTile4Color()
 ^+d:: SetDepositBoxColor()          ; set deposit box color
 ^+e:: SetDepositBoxOpenTopLeft()    ; deposit box open area top-left
 ^+r:: SetDepositBoxOpenBottomRight() ; deposit box open area bottom-right
@@ -479,7 +534,19 @@ SetFishingSpotColor() {
         IniWrite(SubStr(FishingSpotColor, 3), ConfigPath, "Settings", "FishingSpotColor")
     catch
         {}
-    ToolTip("Fishing spot color set: " FishingSpotColor)
+    ToolTip("Fishing spot primary set: " FishingSpotColor)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SetFishingSpotSecondaryColor() {
+    global FishingSpotSecondaryColor, ConfigPath
+    MouseGetPos(&mx, &my)
+    FishingSpotSecondaryColor := PixelGetColor(mx, my, "RGB")
+    try
+        IniWrite(SubStr(FishingSpotSecondaryColor, 3), ConfigPath, "Settings", "FishingSpotSecondaryColor")
+    catch
+        {}
+    ToolTip("Fishing spot secondary set: " FishingSpotSecondaryColor " (we click this when near primary)")
     SetTimer(() => ToolTip(), 2000)
 }
 
@@ -505,6 +572,30 @@ SetNavTile2Color() {
     catch
         {}
     ToolTip("Nav tile 2 color set at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SetNavTile3Color() {
+    global NavTile3Color, ConfigPath
+    MouseGetPos(&mx, &my)
+    NavTile3Color := PixelGetColor(mx, my, "RGB")
+    try
+        IniWrite(SubStr(NavTile3Color, 3), ConfigPath, "Banking", "NavTile3Color")
+    catch
+        {}
+    ToolTip("Nav tile 3 color set at " mx "," my)
+    SetTimer(() => ToolTip(), 2000)
+}
+
+SetNavTile4Color() {
+    global NavTile4Color, ConfigPath
+    MouseGetPos(&mx, &my)
+    NavTile4Color := PixelGetColor(mx, my, "RGB")
+    try
+        IniWrite(SubStr(NavTile4Color, 3), ConfigPath, "Banking", "NavTile4Color")
+    catch
+        {}
+    ToolTip("Nav tile 4 color set at " mx "," my)
     SetTimer(() => ToolTip(), 2000)
 }
 
@@ -899,14 +990,123 @@ SwapColorBGR(c) {
     return "0x" Format("{:06X}", ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF))
 }
 
+; --- Helper: flood-fill from (startX,startY) for targetColor, click center of connected region ---
+FloodFillClickColor(startX, startY, targetColor, colorVariation, paX1, paY1, paX2, paY2) {
+    global BoundsScanStep, BoundsMaxDist, ClickJitter, ClickDelayMs
+    limitL := Max(paX1, startX - BoundsMaxDist)
+    limitR := Min(paX2, startX + BoundsMaxDist)
+    limitT := Max(paY1, startY - BoundsMaxDist)
+    limitB := Min(paY2, startY + BoundsMaxDist)
+    visited := Map()
+    queue := [[startX, startY]]
+    minX := startX
+    maxX := startX
+    minY := startY
+    maxY := startY
+    count := 0
+    maxPixels := 1200
+    step := BoundsScanStep
+    while (queue.Length > 0 && count < maxPixels) {
+        pt := queue.Pop()
+        px := pt[1]
+        py := pt[2]
+        key := px "," py
+        if visited.Has(key)
+            continue
+        if (px < limitL || px > limitR || py < limitT || py > limitB)
+            continue
+        try {
+            if !ColorsMatch(PixelGetColor(px, py, "RGB"), targetColor, colorVariation)
+                continue
+        } catch
+            continue
+        visited[key] := true
+        count++
+        minX := Min(minX, px)
+        maxX := Max(maxX, px)
+        minY := Min(minY, py)
+        maxY := Max(maxY, py)
+            for pair in [[-step,0], [step,0], [0,-step], [0,step]] {
+                nx := px + pair[1]
+                ny := py + pair[2]
+            if !visited.Has(nx "," ny)
+                queue.Push([nx, ny])
+        }
+    }
+    clickX := (minX + maxX) // 2
+    clickY := (minY + maxY) // 2
+    if (ClickJitter > 0) {
+        clickX += Random(-ClickJitter, ClickJitter)
+        clickY += Random(-ClickJitter, ClickJitter)
+    }
+    clickX := Max(paX1, Min(paX2, clickX))
+    clickY := Max(paY1, Min(paY2, clickY))
+    MouseMove(clickX, clickY)
+    if (ClickDelayMs > 0)
+        Sleep(ClickDelayMs)
+    Click()
+    return true
+}
+
+; --- Find and click fishing spot: primary first, then secondary nearby (we click secondary) ---
+FindAndClickFishingSpot() {
+    global FishingSpotColor, FishingSpotSecondaryColor, FishSpotSecondaryNearPx, ColorVariation, FishSpotSecondaryVariation
+    global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2, RadiusStep
+    if (FishingSpotColor = "")
+        return false
+    paX1 := PlayAreaX1
+    paY1 := PlayAreaY1
+    paX2 := PlayAreaX2
+    paY2 := PlayAreaY2
+    if (paX2 <= paX1 || paY2 <= paY1) {
+        paX1 := 0
+        paY1 := 0
+        paX2 := A_ScreenWidth
+        paY2 := A_ScreenHeight
+    }
+    ; Secondary not set: use standard single-color flow
+    if (FishingSpotSecondaryColor = "")
+        return FindAndClickColor(FishingSpotColor, ColorVariation, false, true)
+    ; Two-stage: find primary, confirm secondary nearby, click secondary
+    searchX1 := paX1
+    searchY1 := paY1
+    searchX2 := paX2
+    searchY2 := paY2
+    near := FishSpotSecondaryNearPx
+    maxTries := 20
+    loop maxTries {
+        foundX := 0
+        foundY := 0
+        if !PixelSearch(&foundX, &foundY, searchX1, searchY1, searchX2, searchY2, Integer(FishingSpotColor), ColorVariation)
+            return false
+        ; Check if secondary is near this primary
+        winX1 := Max(paX1, foundX - near)
+        winY1 := Max(paY1, foundY - near)
+        winX2 := Min(paX2, foundX + near)
+        winY2 := Min(paY2, foundY + near)
+        secX := 0
+        secY := 0
+        if PixelSearch(&secX, &secY, winX1, winY1, winX2, winY2, Integer(FishingSpotSecondaryColor), FishSpotSecondaryVariation) {
+            FloodFillClickColor(secX, secY, FishingSpotSecondaryColor, FishSpotSecondaryVariation, paX1, paY1, paX2, paY2)
+            return true
+        }
+        ; No secondary nearby; skip this primary and search for next
+        searchX1 := foundX + 1
+        searchY1 := foundY
+        if (searchX1 > searchX2)
+            return false
+    }
+    return false
+}
+
 ; --- Find color in area and click center of matching region; returns true if found and clicked ---
 ; No coordinates stored: we PixelSearch for the color each time (so moving targets like nav tiles work).
 ; useFullScreen=true: search full screen; false = search play area only.
-; useCentroid=true (fishing spot only): sample all matching pixels in a tile-sized window and click their centroid (tile center, not border).
-FindAndClickColor(targetColor, colorVariation, useFullScreen := false, useCentroid := false) {
+; useFishingSpotCenter=true (fishing spot only): multi-line bounds scan - find leftmost/rightmost across several rows,
+;   topmost/bottommost across several cols, then click (minX+maxX)/2, (minY+maxY)/2 = true tile center.
+FindAndClickColor(targetColor, colorVariation, useFullScreen := false, useFishingSpotCenter := false) {
     global PlayAreaX1, PlayAreaY1, PlayAreaX2, PlayAreaY2
     global RadiusStep, ClickJitter, ClickDelayMs, BoundsScanStep, BoundsMaxDist
-    global FishSpotCentroidRadius, FishSpotCentroidStep
     if (targetColor = "")
         return false
     if (useFullScreen) {
@@ -944,38 +1144,10 @@ FindAndClickColor(targetColor, colorVariation, useFullScreen := false, useCentro
     if (radius > maxR)
         return false
 
-    ; When useCentroid (fishing spot): sample all matching pixels in a tile-sized window; click their centroid = tile center
-    if (useCentroid) {
-        x1 := Max(paX1, foundX - FishSpotCentroidRadius)
-        y1 := Max(paY1, foundY - FishSpotCentroidRadius)
-        x2 := Min(paX2, foundX + FishSpotCentroidRadius)
-        y2 := Min(paY2, foundY + FishSpotCentroidRadius)
-        sumX := 0
-        sumY := 0
-        count := 0
-        y := y1
-        while (y <= y2) {
-            x := x1
-            while (x <= x2) {
-                try {
-                    if ColorsMatch(PixelGetColor(x, y, "RGB"), targetColor, colorVariation) {
-                        sumX += x
-                        sumY += y
-                        count++
-                    }
-                } catch
-                    {}
-                x += FishSpotCentroidStep
-            }
-            y += FishSpotCentroidStep
-        }
-        if (count > 0) {
-            clickX := sumX // count
-            clickY := sumY // count
-        } else {
-            clickX := foundX
-            clickY := foundY
-        }
+    ; Fishing spot: flood-fill from first hit to get only the connected spot (ignores other spots on screen)
+    if (useFishingSpotCenter) {
+        FloodFillClickColor(foundX, foundY, targetColor, colorVariation, paX1, paY1, paX2, paY2)
+        return true
     } else {
         ; Original: expand bbox along cross from first hit, click bbox center
         minX := foundX
@@ -1048,18 +1220,21 @@ FindAndClickColor(targetColor, colorVariation, useFullScreen := false, useCentro
 
 ; --- When running: if full do banking or powerfish drop; else try to fish ---
 DoFishingOrBanking() {
-    global FishingMode
+    global FishingMode, FishStatusAction, FishDebugLine
     ; Banking: run when full or mid-return (BankingStep > 0). Powerfishing: run ONLY when full.
     ; When Powerfishing we never run banking; when Banking we run until return is done.
     runBanking := (FishingMode = "Banking") && (IsInventoryFull || BankingStep > 0)
     runPowerfish := (FishingMode = "Powerfishing") && IsInventoryFull
     if (runBanking) {
         TryBankWhenFull()
-        SetTimer(DoFishingOrBanking, 1000)
+        SetTimer(DoFishingOrBanking, FishInterval)
     } else if (runPowerfish) {
+        FishStatusAction := "Dropping fish..."
         TryPowerfishWhenFull()
-        SetTimer(DoFishingOrBanking, 1000)
+        SetTimer(DoFishingOrBanking, FishInterval)
     } else {
+        if (IsFishing)
+            FishStatusAction := "Fishing..."
         TryFishWhenNotFishing()
         SetTimer(DoFishingOrBanking, FishInterval)
     }
@@ -1090,64 +1265,53 @@ TryPowerfishWhenFull() {
     PowerfishLastDropAt := A_TickCount
 }
 
-; --- Banking mode: nav1 -> wait 3–5 s -> nav2 -> wait 3–5 s -> deposit -> wait 5–7 s -> done ---
-; Tries image first (nav1.png, nav2.png, deposit.png in script folder), then color, then BGR color
+; --- Helper: try to click nav tile n (1-4). Returns true if clicked. ---
+TryClickNavTile(n) {
+    global BankingImageOffset, BankingNavColorVariation
+    global NavTile1Color, NavTile2Color, NavTile3Color, NavTile4Color
+    path := A_ScriptDir "\nav" n ".png"
+    ok := FindAndClickImage(path, BankingImageOffset)
+    if (ok)
+        return true
+    c := (n = 1) ? NavTile1Color : (n = 2) ? NavTile2Color : (n = 3) ? NavTile3Color : NavTile4Color
+    if (c != "")
+        ok := FindAndClickColor(c, BankingNavColorVariation, false, false)
+    if (!ok && c != "")
+        ok := FindAndClickColor(SwapColorBGR(c), BankingNavColorVariation, false, false)
+    return ok
+}
+
+; --- Banking mode: nav 4→3→2→1 to bank (click highest visible), 1→2→3→4 back (click lowest), fishing spot shortcut on return ---
+; Wait 7-10 s between nav clicks. To bank: prefer higher nav (closer). To fishing: prefer fishing spot, else lowest nav.
 TryBankWhenFull() {
-    global BankingStep, BankWaitUntil, BankNavWaitMin, BankNavWaitMax
+    global BankingStep, BankWaitUntil, BankLastNavClickAt, BankNavWaitMin, BankNavWaitMax, BankNavClickMinMs
+    global FishStatusAction, FishDebugLine
     global BankDepositBoxOpenWaitMin, BankDepositBoxOpenWaitMax
     global BankDepositWaitMin, BankDepositWaitMax, BankRecaptureEmptyAt
     global BankDepositAreaLastClickAt, BankDepositAreaClickCooldownMs
-    global NavTile1Color, NavTile2Color, DepositBoxColor, BankingColorVariation, BankingNavColorVariation, BankingImageOffset
+    global NavPointCount, NavTile1Color, NavTile2Color, NavTile3Color, NavTile4Color, DepositBoxColor
+    global FishingSpotColor, ColorVariation, LastFishClickTime, LastFishClickCooldownMs
+    global FishClickCooldownMin, FishClickCooldownMax
+    global BankingColorVariation, BankingNavColorVariation, BankingImageOffset
     global DepositBoxOpenX1, DepositBoxOpenY1, DepositBoxOpenX2, DepositBoxOpenY2, DepositBoxOpenColor
-    if (BankingStep = 0)
-        BankingStep := 1
+    if (BankingStep = 0) {
+        BankingStep := (NavPointCount >= 1) ? 1 : 5
+        BankLastNavClickAt := 0
+    }
+    FishDebugLine := "BankStep=" BankingStep
+    ; Step 1: Going to bank. Try deposit first, then nav 4,3,2,1 (highest first = closest to bank)
+    ; Don't wait full 7-10s: if next target (deposit or nav) shows up, click it (min BankNavClickMinMs to prevent double-click)
     if (BankingStep = 1) {
-        path1 := A_ScriptDir "\nav1.png"
-        ok := FindAndClickImage(path1, BankingImageOffset)
-        if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false, true)
-        if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false, true)
-        if (ok) {
-            BankingStep := 2
-            BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
-        } else if (NavTile1Color = "" && !FileExist(path1))
-            ToolTip("Banking: Set nav tile 1 (Ctrl+Shift+1) or add nav1.png")
-        else
-            ToolTip("Nav 1: no match – add nav1.png (screenshot tile) or raise BankingNavColorVariation")
-        if (!ok)
-            SetTimer(() => ToolTip(), 4000)
-        return
-    }
-    if (BankingStep = 2) {
-        if (A_TickCount >= BankWaitUntil)
-            BankingStep := 3
-        return
-    }
-    if (BankingStep = 3) {
-        path2 := A_ScriptDir "\nav2.png"
-        ok := FindAndClickImage(path2, BankingImageOffset)
-        if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false, true)
-        if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false, true)
-        if (ok) {
-            BankingStep := 4
-            BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
-        } else if (NavTile2Color = "" && !FileExist(path2))
-            ToolTip("Banking: Set nav tile 2 (Ctrl+Shift+2) or add nav2.png")
-        else
-            ToolTip("Nav 2: no match – add nav2.png or raise BankingNavColorVariation")
-        if (!ok)
-            SetTimer(() => ToolTip(), 4000)
-        return
-    }
-    if (BankingStep = 4) {
-        if (A_TickCount >= BankWaitUntil)
+        if (BankLastNavClickAt > 0 && (A_TickCount - BankLastNavClickAt) < BankNavClickMinMs) {
+            FishStatusAction := "To bank: waiting min delay..."
+            return
+        }
+        if (NavPointCount < 1) {
             BankingStep := 5
-        return
-    }
-    if (BankingStep = 5) {
+            return
+        }
+        FishStatusAction := "To bank: looking for deposit or nav 4→1"
+        ; Try deposit first
         pathD := A_ScriptDir "\deposit.png"
         ok := FindAndClickImage(pathD, BankingImageOffset)
         if (!ok && DepositBoxColor != "")
@@ -1155,6 +1319,43 @@ TryBankWhenFull() {
         if (!ok && DepositBoxColor != "")
             ok := FindAndClickColor(SwapColorBGR(DepositBoxColor), BankingColorVariation, false)
         if (ok) {
+            FishStatusAction := "Clicked deposit — waiting for open"
+            BankLastNavClickAt := A_TickCount
+            if (DepositBoxOpenX2 > DepositBoxOpenX1 && DepositBoxOpenY2 > DepositBoxOpenY1 && DepositBoxOpenColor != "") {
+                BankingStep := 55
+                BankWaitUntil := A_TickCount + Random(BankDepositBoxOpenWaitMin, BankDepositBoxOpenWaitMax)
+            } else {
+                BankingStep := 6
+                BankWaitUntil := A_TickCount + Random(BankDepositWaitMin, BankDepositWaitMax)
+            }
+            return
+        }
+        ; Try nav 4,3,2,1 (highest first = closest to bank)
+        loop NavPointCount {
+            n := NavPointCount - A_Index + 1
+            if (TryClickNavTile(n)) {
+                FishStatusAction := "Clicked nav " n " (to bank)"
+                BankLastNavClickAt := A_TickCount
+                BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
+                return
+            }
+        }
+        FishStatusAction := "To bank: deposit/nav not found"
+        if (DepositBoxColor = "" && !FileExist(pathD))
+            ToolTip("Banking: Set deposit (Ctrl+Shift+D) or nav tiles")
+        SetTimer(() => ToolTip(), 4000)
+        return
+    }
+    if (BankingStep = 5) {
+        FishStatusAction := "No nav: looking for deposit"
+        pathD := A_ScriptDir "\deposit.png"
+        ok := FindAndClickImage(pathD, BankingImageOffset)
+        if (!ok && DepositBoxColor != "")
+            ok := FindAndClickColor(DepositBoxColor, BankingColorVariation, false)
+        if (!ok && DepositBoxColor != "")
+            ok := FindAndClickColor(SwapColorBGR(DepositBoxColor), BankingColorVariation, false)
+        if (ok) {
+            FishStatusAction := "Clicked deposit — waiting for open"
             ; If deposit box open detection is set, wait for open (or 5s timeout) before starting deposit-done timer
             if (DepositBoxOpenX2 > DepositBoxOpenX1 && DepositBoxOpenY2 > DepositBoxOpenY1 && DepositBoxOpenColor != "") {
                 BankingStep := 55
@@ -1172,10 +1373,12 @@ TryBankWhenFull() {
         return
     }
     if (BankingStep = 55) {
+        FishStatusAction := "Waiting for deposit box to open..."
         ; Wait for deposit box open (color in area) or 5 s timeout
         if (IsDepositBoxOpen()) {
             ; Box is open: click the color in the deposit area (e.g. Deposit-all)
             if (ClickColorInDepositArea()) {
+                FishStatusAction := "Clicked deposit-all — waiting for close"
                 BankDepositAreaLastClickAt := A_TickCount
                 BankingStep := 6
                 BankWaitUntil := A_TickCount + BankDepositClosedTimeout
@@ -1187,74 +1390,73 @@ TryBankWhenFull() {
         return
     }
     if (BankingStep = 6) {
+        FishStatusAction := "Depositing... waiting for box to close"
         ; Deposited = set color no longer in deposit area (box closed). If color persists, click again (other fish types).
         depositOpenSet := (DepositBoxOpenX2 > DepositBoxOpenX1 && DepositBoxOpenY2 > DepositBoxOpenY1 && DepositBoxOpenColor != "")
         if (depositOpenSet) {
-            if (!IsDepositBoxOpen() || A_TickCount >= BankWaitUntil)
+            if (!IsDepositBoxOpen() || A_TickCount >= BankWaitUntil) {
                 BankingStep := 7
+                BankLastNavClickAt := 0
+            }
             else if (A_TickCount - BankDepositAreaLastClickAt >= BankDepositAreaClickCooldownMs) {
                 ; Color still there = deposit box still open (e.g. other fish types); click deposit area again
                 if (ClickColorInDepositArea())
                     BankDepositAreaLastClickAt := A_TickCount
             }
         } else {
-            if (A_TickCount >= BankWaitUntil)
+            if (A_TickCount >= BankWaitUntil) {
                 BankingStep := 7
+                BankLastNavClickAt := 0
+            }
         }
         return
     }
+    ; Step 7: Returning to fishing. Try fishing spot first (shortcut!), then nav 1→2→3→4 (closest to spot first so we don't re-click 4 when 3 is visible)
+    ; Don't wait full time: if next target (fishing spot or nav) shows up, click it
     if (BankingStep = 7) {
-        ; Returning: click nav 2, then wait 7–9 s, then nav 1, wait 2–3 s, then fishing
-        path2 := A_ScriptDir "\nav2.png"
-        ok := FindAndClickImage(path2, BankingImageOffset)
-        if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(NavTile2Color, BankingNavColorVariation, false, true)
-        if (!ok && NavTile2Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile2Color), BankingNavColorVariation, false, true)
-        if (ok) {
-            BankingStep := 8
-            BankWaitUntil := A_TickCount + Random(BankReturnNav2WaitMin, BankReturnNav2WaitMax)
-        } else
-            ToolTip("Returning: nav 2 not found – check tile or add nav2.png")
-        if (!ok)
-            SetTimer(() => ToolTip(), 4000)
-        return
-    }
-    if (BankingStep = 8) {
-        if (A_TickCount >= BankWaitUntil)
-            BankingStep := 9
-        return
-    }
-    if (BankingStep = 9) {
-        ; Click nav 1 (back to fishing spot), then wait 2–3 s and return to fishing
-        path1 := A_ScriptDir "\nav1.png"
-        ok := FindAndClickImage(path1, BankingImageOffset)
-        if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(NavTile1Color, BankingNavColorVariation, false, true)
-        if (!ok && NavTile1Color != "")
-            ok := FindAndClickColor(SwapColorBGR(NavTile1Color), BankingNavColorVariation, false, true)
-        if (ok) {
-            BankingStep := 10
-            BankWaitUntil := A_TickCount + Random(BankReturnNav1WaitMin, BankReturnNav1WaitMax)
-        } else
-            ToolTip("Returning: nav 1 not found – check tile or add nav1.png")
-        if (!ok)
-            SetTimer(() => ToolTip(), 4000)
-        return
-    }
-    if (BankingStep = 10) {
-        if (A_TickCount >= BankWaitUntil) {
+        if (BankLastNavClickAt > 0 && (A_TickCount - BankLastNavClickAt) < BankNavClickMinMs) {
+            FishStatusAction := "Return: waiting min delay..."
+            return
+        }
+        if (NavPointCount < 1) {
             BankingStep := 0
             BankRecaptureEmptyAt := A_TickCount + 2500
+            return
         }
+        FishStatusAction := "Return: looking for fishing spot or nav 1→4"
+        ; Fishing spot shortcut: if visible, click it and we're done
+        if (FishingSpotColor != "" && FindAndClickFishingSpot()) {
+            LastFishClickTime := A_TickCount
+            LastFishClickCooldownMs := Random(FishClickCooldownMin, FishClickCooldownMax)
+            FishStatusAction := "Clicked fishing spot — done"
+            BankLastNavClickAt := 0
+            BankingStep := 0
+            BankRecaptureEmptyAt := A_TickCount + 2500
+            return
+        }
+        ; Try nav 1,2,3,4 (lowest first = closest to fishing spot; avoids re-clicking 4 when 3 is also visible)
+        loop NavPointCount {
+            n := A_Index
+            if (TryClickNavTile(n)) {
+                FishStatusAction := "Clicked nav " n " (return)"
+                BankLastNavClickAt := A_TickCount
+                BankWaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
+                return
+            }
+        }
+        FishStatusAction := "Return: no nav or fishing spot visible"
+        ToolTip("Returning: no nav or fishing spot visible")
+        SetTimer(() => ToolTip(), 4000)
         return
     }
 }
 
 ; --- When not fishing and not full: find fishing spot and click (only inside play area) ---
 TryFishWhenNotFishing() {
-    global IsFishing, FishingSpotColor, ColorVariation
+    global IsFishing, FishingSpotColor, ColorVariation, FishStatusAction, FishDebugLine
     global LastFishClickTime, LastFishClickCooldownMs, FishClickCooldownMin, FishClickCooldownMax
+    global FishSpotFailCount, FishNav1WaitUntil, FishingMode, NavPointCount
+    global BankNavWaitMin, BankNavWaitMax
     if IsFishing || (FishingSpotColor = "")
         return
     if IsInventoryFull
@@ -1262,9 +1464,29 @@ TryFishWhenNotFishing() {
     ; After clicking a fishing spot, wait 5–10 s before clicking again (does not affect other clicks)
     if (LastFishClickTime > 0 && (A_TickCount - LastFishClickTime) < LastFishClickCooldownMs)
         return
-    if FindAndClickColor(FishingSpotColor, ColorVariation, false, true) {
+    FishStatusAction := "Looking for fishing spot"
+    FishDebugLine := "FailCount=" FishSpotFailCount " Nav1Wait=" (FishNav1WaitUntil > 0 ? "Y" : "N")
+    ; Always try to find spot first (don't wait full nav1 cooldown if spot shows up)
+    if FindAndClickFishingSpot() {
+        FishStatusAction := "Clicked fishing spot"
+        FishNav1WaitUntil := 0
+        FishSpotFailCount := 0
         LastFishClickTime := A_TickCount
         LastFishClickCooldownMs := Random(FishClickCooldownMin, FishClickCooldownMax)
+        return
+    }
+    ; No spot found: after 3 failures, click nav1 to reposition (nav1 can see spots)
+    FishSpotFailCount++
+    if (FishSpotFailCount >= 3 && FishingMode = "Banking" && NavPointCount >= 1) {
+        if (FishNav1WaitUntil > 0 && A_TickCount < FishNav1WaitUntil)
+            return
+        FishSpotFailCount := 0
+        if (TryClickNavTile(1)) {
+            FishStatusAction := "No spot — clicked nav1 to reposition"
+            FishNav1WaitUntil := A_TickCount + Random(BankNavWaitMin, BankNavWaitMax)
+        } else {
+            FishStatusAction := "No spot — nav1 not found"
+        }
     }
 }
 

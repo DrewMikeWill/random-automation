@@ -14,7 +14,7 @@ global WithdrawAreaY1 := 0
 global WithdrawAreaX2 := 0
 global WithdrawAreaY2 := 0
 global WithdrawAreaSamples := []   ; array of {x, y, color} — area must look the same (multiple pixels) to be "bank open"
-global WithdrawVariation := 10
+global WithdrawVariation := 15
 
 ; Cooking status: area + color (color in area = we are cooking)
 global CookingStatusX1 := 0
@@ -45,7 +45,7 @@ global DepositAllY1 := 0
 global DepositAllX2 := 0
 global DepositAllY2 := 0
 global DepositAllAreaSamples := []   ; array of {x, y, color} — area must look the same (multiple pixels) to be "bank open"
-global DepositAllVariation := 10
+global DepositAllVariation := 15
 
 ; Run duration
 global RunDurationMinutes := 0
@@ -657,7 +657,7 @@ SampleAreaPixels(x1, y1, x2, y2) {
     return samples
 }
 
-; True if current screen at saved sample positions matches (at least 4 of 5 pixels within variation).
+; True if current screen at saved sample positions matches (allow 1 mismatching pixel so cursor/tooltip don't break it).
 AreaLooksSame(samples, variation) {
     if (samples.Length < 4)
         return false
@@ -670,7 +670,8 @@ AreaLooksSame(samples, variation) {
         if (ColorsMatch(c, s.color, variation))
             matchCount++
     }
-    return (matchCount >= 4)
+    ; Need at least 4 matches, or (samples - 1) so one bad pixel (cursor, lighting) doesn't fail
+    return (matchCount >= Max(4, samples.Length - 1))
 }
 
 ; Returns true if both areas were valid and multi-pixel look was learned.
@@ -898,6 +899,18 @@ DoCookingStep() {
     }
     CookDebugLine := "Step=" CookStep " Inv=" InvSlotState " sawEmpty=" (CookStep3SawEmpty ? "1" : "0")
     if (CookStep = 1) {
+        ; If bank is already open (e.g. we retried from step 2 but area check had flaked), go to step 2 instead of clicking again
+        if (WithdrawAreaSamples.Length >= 4 && DepositAllAreaSamples.Length >= 4) {
+            bankOpen := AreaLooksSame(WithdrawAreaSamples, WithdrawVariation) && AreaLooksSame(DepositAllAreaSamples, DepositAllVariation)
+            if (bankOpen) {
+                CookStatusAction := "Bank already open — use it"
+                CookStep := 2
+                CookPendingDeposit := true
+                CookWaitUntil := A_TickCount + Random(500, 2000)
+                CookBankClickTime := 0
+                return
+            }
+        }
         CookStatusAction := "Click bank (find color)"
         if FindAndClickColorFullScreen(BankColor, BankColorVariation, true) {
             CookStep := 2
@@ -1013,8 +1026,10 @@ DoCookingStep() {
     }
     if (CookStep = 7) {
         SetTimer(DoCookingStep, 400)   ; check cooking status often (e.g. level-up stops cooking)
+        UpdateInvSlotState()          ; fresh read so we don't miss the transition (timer runs every 800ms)
         CookStatusAction := "Cooking (wait inv=cooked)"
-        if (InvSlotState = "cooked") {
+        ; Treat both "cooked" and "empty" as done: cooked = slot has cooked food (no raw); empty = slot empty or misdetected (e.g. cooked color near EmptyColor). Either way last slot is "gone" and we should bank.
+        if (InvSlotState = "cooked" || InvSlotState = "empty") {
             CookStatusAction := "All cooked — go to bank"
             CookStep := 8
             SetTimer(DoCookingStep, 1000)
@@ -1034,6 +1049,18 @@ DoCookingStep() {
     }
     if (CookStep = 8) {
         SetTimer(DoCookingStep, 1000)
+        ; If bank is already open, go to step 2 instead of clicking again
+        if (WithdrawAreaSamples.Length >= 4 && DepositAllAreaSamples.Length >= 4) {
+            bankOpen := AreaLooksSame(WithdrawAreaSamples, WithdrawVariation) && AreaLooksSame(DepositAllAreaSamples, DepositAllVariation)
+            if (bankOpen) {
+                CookStatusAction := "Bank already open — use it"
+                CookStep := 2
+                CookPendingDeposit := true
+                CookWaitUntil := A_TickCount + Random(500, 2000)
+                CookBankClickTime := 0
+                return
+            }
+        }
         CookStatusAction := "Click bank (return)"
         if FindAndClickColorFullScreen(BankColor, BankColorVariation, true) {
             CookStep := 2
